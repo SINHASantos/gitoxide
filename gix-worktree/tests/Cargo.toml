@@ -1,12 +1,14 @@
+lints.workspace = true
+
 [package]
 name = "gix-worktree-tests"
 version = "0.0.0"
-repository = "https://github.com/Byron/gitoxide"
+repository = "https://github.com/GitoxideLabs/gitoxide"
 license = "MIT OR Apache-2.0"
 description = "A crate for testing the gix-worktree crate with feature toggles"
 authors = ["Sebastian Thiel <sebastian.thiel@icloud.com>"]
 edition = "2021"
-rust-version = "1.65"
+rust-version = "1.70"
 publish = false
 
 [[test]]
@@ -17,7 +19,7 @@ path = "integrate.rs"
 gix-features-parallel = ["gix-features/parallel"]
 
 [dev-dependencies]
-gix-worktree = { path = ".." }
+gix-worktree = { path = "..", features = ["attributes"] }
 gix-index = { path = "../../gix-index" }
 gix-fs = { path = "../../gix-fs" }
 gix-hash = { path = "../../gix-hash" }

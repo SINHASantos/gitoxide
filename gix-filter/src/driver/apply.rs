@@ -63,6 +63,7 @@ pub struct Context<'a, 'b> {
     pub blob: Option<gix_hash::ObjectId>,
 }
 
+/// Apply operations to filter programs.
 impl State {
     /// Apply `operation` of `driver` to the bytes read from `src` and return a reader to immediately consume the output
     /// produced by the filter. `rela_path` is the repo-relative path of the entry to handle.
@@ -124,7 +125,7 @@ impl State {
 
                 let invoke_result = client.invoke(
                     command,
-                    [
+                    &mut [
                         ("pathname", Some(ctx.rela_path.to_owned())),
                         ("ref", ctx.ref_name.map(ToOwned::to_owned)),
                         ("treeish", ctx.treeish.map(|id| id.to_hex().to_string().into())),

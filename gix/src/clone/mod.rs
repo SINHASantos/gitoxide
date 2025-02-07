@@ -1,6 +1,4 @@
 #![allow(clippy::result_large_err)]
-use std::convert::TryInto;
-
 use crate::{bstr::BString, config::tree::gitoxide, remote};
 
 type ConfigureRemoteFn =
@@ -20,6 +18,8 @@ pub struct PrepareFetch {
     repo: Option<crate::Repository>,
     /// The name of the remote, which defaults to `origin` if not overridden.
     remote_name: Option<BString>,
+    /// Additional config `values` that are applied in-memory before starting the fetch process.
+    config_overrides: Vec<BString>,
     /// A function to configure a remote prior to fetching a pack.
     configure_remote: Option<ConfigureRemoteFn>,
     /// A function to configure a connection before using it.
@@ -34,6 +34,9 @@ pub struct PrepareFetch {
     /// How to handle shallow clones
     #[cfg_attr(not(feature = "blocking-network-client"), allow(dead_code))]
     shallow: remote::fetch::Shallow,
+    /// The name of the reference to fetch. If `None`, the reference pointed to by `HEAD` will be checked out.
+    #[cfg_attr(not(feature = "blocking-network-client"), allow(dead_code))]
+    ref_name: Option<gix_ref::PartialName>,
 }
 
 /// The error returned by [`PrepareFetch::new()`].
@@ -53,7 +56,7 @@ pub enum Error {
 
 /// Instantiation
 impl PrepareFetch {
-    /// Create a new repository at `path` with `crate_opts` which is ready to clone from `url`, possibly after making additional adjustments to
+    /// Create a new repository at `path` with `create_opts` which is ready to clone from `url`, possibly after making additional adjustments to
     /// configuration and settings.
     ///
     /// Note that this is merely a handle to perform the actual connection to the remote, and if any of it fails the freshly initialized repository
@@ -68,14 +71,30 @@ impl PrepareFetch {
         url: Url,
         path: impl AsRef<std::path::Path>,
         kind: crate::create::Kind,
-        mut create_opts: crate::create::Options,
+        create_opts: crate::create::Options,
         open_opts: crate::open::Options,
     ) -> Result<Self, Error>
     where
         Url: TryInto<gix_url::Url, Error = E>,
         gix_url::parse::Error: From<E>,
     {
-        let mut url = url.try_into().map_err(gix_url::parse::Error::from)?;
+        Self::new_inner(
+            url.try_into().map_err(gix_url::parse::Error::from)?,
+            path.as_ref(),
+            kind,
+            create_opts,
+            open_opts,
+        )
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn new_inner(
+        mut url: gix_url::Url,
+        path: &std::path::Path,
+        kind: crate::create::Kind,
+        mut create_opts: crate::create::Options,
+        open_opts: crate::open::Options,
+    ) -> Result<Self, Error> {
         create_opts.destination_must_be_empty = true;
         let mut repo = crate::ThreadSafeRepository::init_opts(path, kind, create_opts, open_opts)?.to_thread_local();
         url.canonicalize(repo.options.current_dir_or_empty())
@@ -86,20 +105,10 @@ impl PrepareFetch {
         if repo.committer().is_none() {
             let mut config = gix_config::File::new(gix_config::file::Metadata::api());
             config
-                .set_raw_value(
-                    "gitoxide",
-                    Some("committer".into()),
-                    gitoxide::Committer::NAME_FALLBACK.name,
-                    "no name configured during clone",
-                )
+                .set_raw_value(&gitoxide::Committer::NAME_FALLBACK, "no name configured during clone")
                 .expect("works - statically known");
             config
-                .set_raw_value(
-                    "gitoxide",
-                    Some("committer".into()),
-                    gitoxide::Committer::EMAIL_FALLBACK.name,
-                    "noEmailAvailable@example.com",
-                )
+                .set_raw_value(&gitoxide::Committer::EMAIL_FALLBACK, "noEmailAvailable@example.com")
                 .expect("works - statically known");
             let mut repo_config = repo.config_snapshot_mut();
             repo_config.append(config);
@@ -110,24 +119,28 @@ impl PrepareFetch {
             #[cfg(any(feature = "async-network-client", feature = "blocking-network-client"))]
             fetch_options: Default::default(),
             repo: Some(repo),
+            config_overrides: Vec::new(),
             remote_name: None,
             configure_remote: None,
             #[cfg(any(feature = "async-network-client", feature = "blocking-network-client"))]
             configure_connection: None,
             shallow: remote::fetch::Shallow::NoChange,
+            ref_name: None,
         })
     }
 }
 
-/// A utility to collect configuration on how to perform a checkout into a working tree, and when dropped without checking out successfully
-/// the fetched repository will be dropped.
+/// A utility to collect configuration on how to perform a checkout into a working tree,
+/// and when dropped without checking out successfully the fetched repository will be deleted from disk.
 #[must_use]
+#[cfg(feature = "worktree-mutation")]
+#[derive(Debug)]
 pub struct PrepareCheckout {
-    /// A freshly initialized repository which is owned by us, or `None` if it was handed to the user
+    /// A freshly initialized repository which is owned by us, or `None` if it was successfully checked out.
     pub(self) repo: Option<crate::Repository>,
+    /// The name of the reference to check out. If `None`, the reference pointed to by `HEAD` will be checked out.
+    pub(self) ref_name: Option<gix_ref::PartialName>,
 }
-
-mod access;
 
 // This module encapsulates functionality that works with both feature toggles. Can be combined with `fetch`
 // once async and clone are a thing.
@@ -164,5 +177,8 @@ mod access_feat {
 #[cfg(any(feature = "async-network-client-async-std", feature = "blocking-network-client"))]
 pub mod fetch;
 
+mod access;
+
 ///
+#[cfg(feature = "worktree-mutation")]
 pub mod checkout;

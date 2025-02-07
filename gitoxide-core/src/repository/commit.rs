@@ -20,7 +20,7 @@ pub fn verify(repo: gix::Repository, rev_spec: Option<&str>) -> Result<()> {
     signature_storage.write_all(signature.as_ref())?;
     let signed_storage = signature_storage.into_temp_path();
 
-    let mut cmd = std::process::Command::new("gpg");
+    let mut cmd: std::process::Command = gix::command::prepare("gpg").into();
     cmd.args(["--keyid-format=long", "--status-fd=1", "--verify"])
         .arg(&signed_storage)
         .arg("-")
@@ -52,6 +52,7 @@ pub fn describe(
         statistics,
         max_candidates,
         long_format,
+        dirty_suffix,
     }: describe::Options,
 ) -> Result<()> {
     repo.object_cache_size_if_unset(4 * 1024 * 1024);
@@ -80,7 +81,7 @@ pub fn describe(
         writeln!(err, "traversed {} commits", resolution.outcome.commits_seen)?;
     }
 
-    let mut describe_id = resolution.format()?;
+    let mut describe_id = resolution.format_with_dirty_suffix(dirty_suffix)?;
     describe_id.long(long_format);
 
     writeln!(out, "{describe_id}")?;
@@ -97,5 +98,6 @@ pub mod describe {
         pub long_format: bool,
         pub statistics: bool,
         pub max_candidates: usize,
+        pub dirty_suffix: Option<String>,
     }
 }

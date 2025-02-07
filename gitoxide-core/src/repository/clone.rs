@@ -6,15 +6,16 @@ pub struct Options {
     pub handshake_info: bool,
     pub no_tags: bool,
     pub shallow: gix::remote::fetch::Shallow,
+    pub ref_name: Option<gix::refs::PartialName>,
 }
 
 pub const PROGRESS_RANGE: std::ops::RangeInclusive<u8> = 1..=3;
 
 pub(crate) mod function {
-    use std::ffi::OsStr;
+    use std::{borrow::Cow, ffi::OsStr};
 
     use anyhow::{bail, Context};
-    use gix::{bstr::BString, remote::fetch::Status, Progress};
+    use gix::{bstr::BString, remote::fetch::Status, NestedProgress};
 
     use super::Options;
     use crate::{repository::fetch::function::print_updates, OutputFormat};
@@ -31,11 +32,12 @@ pub(crate) mod function {
             handshake_info,
             bare,
             no_tags,
+            ref_name,
             shallow,
         }: Options,
     ) -> anyhow::Result<()>
     where
-        P: Progress,
+        P: NestedProgress,
         P::SubProgress: 'static,
     {
         if format != OutputFormat::Human {
@@ -45,11 +47,13 @@ pub(crate) mod function {
         let url: gix::Url = url.as_ref().try_into()?;
         let directory = directory.map_or_else(
             || {
-                gix::path::from_bstr(url.path.as_ref())
-                    .as_ref()
-                    .file_stem()
-                    .map(Into::into)
-                    .context("Filename extraction failed - path too short")
+                let path = gix::path::from_bstr(Cow::Borrowed(url.path.as_ref()));
+                if !bare && path.extension() == Some(OsStr::new("git")) {
+                    path.file_stem().map(Into::into)
+                } else {
+                    path.file_name().map(Into::into)
+                }
+                .context("Filename extraction failed - path too short")
             },
             |dir| Ok(dir.into()),
         )?;
@@ -73,6 +77,7 @@ pub(crate) mod function {
         }
         let (mut checkout, fetch_outcome) = prepare
             .with_shallow(shallow)
+            .with_ref_name(ref_name.as_ref())?
             .fetch_then_checkout(&mut progress, &gix::interrupt::IS_INTERRUPTED)?;
 
         let (repo, outcome) = if bare {
@@ -84,7 +89,7 @@ pub(crate) mod function {
 
         if handshake_info {
             writeln!(out, "Handshake Information")?;
-            writeln!(out, "\t{:?}", fetch_outcome.ref_map.handshake)?;
+            writeln!(out, "\t{:?}", fetch_outcome.handshake)?;
         }
 
         match fetch_outcome.status {

@@ -1,4 +1,4 @@
-use std::{convert::Infallible, sync::atomic::AtomicBool};
+use std::sync::atomic::AtomicBool;
 
 use gix_features::{
     parallel::{reduce::Finalize, InOrderIter},
@@ -9,7 +9,6 @@ use gix_pack::data::{
     output,
     output::{count, entry},
 };
-use gix_traverse::commit;
 
 use crate::pack::{
     data::output::{db, DbKind},
@@ -241,13 +240,10 @@ fn traversals() -> crate::Result {
         .copied()
         {
             let head = hex_to_id("dfcb5e39ac6eb30179808bbab721e8a28ce1b52e");
-            let mut commits = commit::Ancestors::new(Some(head), commit::ancestors::State::default(), {
-                let db = db.clone();
-                move |oid, buf| db.find_commit_iter(oid, buf).map(|t| t.0)
-            })
-            .map(Result::unwrap)
-            .map(|c| c.id)
-            .collect::<Vec<_>>();
+            let mut commits = gix_traverse::commit::Simple::new(Some(head), db.clone())
+                .map(Result::unwrap)
+                .map(|c| c.id)
+                .collect::<Vec<_>>();
             if let Some(take) = take {
                 commits.resize(take, gix_hash::Kind::Sha1.null());
             }
@@ -255,16 +251,18 @@ fn traversals() -> crate::Result {
             let deterministic_count_needs_single_thread = Some(1);
             let (counts, stats) = output::count::objects(
                 db.clone(),
-                commits
-                    .into_iter()
-                    .chain(std::iter::once(hex_to_id(if take.is_some() {
-                        "0000000000000000000000000000000000000000"
-                    } else {
-                        "e3fb53cbb4c346d48732a24f09cf445e49bc63d6"
-                    })))
-                    .filter(|o| !o.is_null())
-                    .map(Ok::<_, Infallible>),
-                progress::Discard,
+                Box::new(
+                    commits
+                        .into_iter()
+                        .chain(std::iter::once(hex_to_id(if take.is_some() {
+                            "0000000000000000000000000000000000000000"
+                        } else {
+                            "e3fb53cbb4c346d48732a24f09cf445e49bc63d6"
+                        })))
+                        .filter(|o| !o.is_null())
+                        .map(Ok),
+                ),
+                &progress::Discard,
                 &AtomicBool::new(false),
                 count::objects::Options {
                     input_object_expansion: expansion_mode,
@@ -274,7 +272,7 @@ fn traversals() -> crate::Result {
             )?;
             let actual_count = counts.iter().fold(ObjectCount::default(), |mut c, e| {
                 let mut buf = Vec::new();
-                if let Ok((obj, _location)) = db.find(e.id, &mut buf) {
+                if let Ok((obj, _location)) = db.find(&e.id, &mut buf) {
                     c.add(obj.kind);
                 }
                 c
@@ -289,7 +287,7 @@ fn traversals() -> crate::Result {
             let mut entries_iter = output::entry::iter_from_counts(
                 counts,
                 db.clone(),
-                progress::Discard,
+                Box::new(progress::Discard),
                 output::entry::iter_from_counts::Options {
                     allow_thin_pack,
                     ..Default::default()
@@ -324,13 +322,18 @@ fn traversals() -> crate::Result {
 
 #[test]
 fn empty_pack_is_allowed() {
-    write_and_verify(
-        db(DbKind::DeterministicGeneratedContent).unwrap(),
-        vec![],
-        hex_to_id("029d08823bd8a8eab510ad6ac75c823cfd3ed31e"),
-        None,
-    )
-    .unwrap();
+    assert_eq!(
+        write_and_verify(
+            db(DbKind::DeterministicGeneratedContent).unwrap(),
+            vec![],
+            hex_to_id("029d08823bd8a8eab510ad6ac75c823cfd3ed31e"),
+            None,
+        )
+        .unwrap_err()
+        .to_string(),
+        "pack data directory should be set",
+        "empty packs are not actually written as they would be useless"
+    );
 }
 
 fn write_and_verify(
@@ -348,9 +351,7 @@ fn write_and_verify(
     let (num_written_bytes, pack_hash) = {
         let num_entries = entries.len();
         let mut pack_writer = output::bytes::FromEntriesIter::new(
-            std::iter::once(Ok::<_, entry::iter_from_counts::Error<gix_odb::store::find::Error>>(
-                entries,
-            )),
+            std::iter::once(Ok::<_, entry::iter_from_counts::Error>(entries)),
             &mut pack_file,
             num_entries as u32,
             pack::data::Version::V2,
@@ -375,7 +376,7 @@ fn write_and_verify(
     );
     let pack = pack::data::File::at(&pack_file_path, gix_hash::Kind::Sha1)?;
     let should_interrupt = AtomicBool::new(false);
-    let hash = pack.verify_checksum(progress::Discard, &should_interrupt)?;
+    let hash = pack.verify_checksum(&mut progress::Discard, &should_interrupt)?;
     assert_eq!(
         hash, pack_hash,
         "the trailer of the pack matches the actually written trailer"
@@ -388,15 +389,15 @@ fn write_and_verify(
     let object_hash = gix_hash::Kind::Sha1; // TODO: parameterize this
     let bundle = pack::Bundle::at(
         pack::Bundle::write_to_directory(
-            std::io::BufReader::new(std::fs::File::open(pack_file_path)?),
+            &mut std::io::BufReader::new(std::fs::File::open(pack_file_path)?),
             Some(tmp_dir.path()),
-            progress::Discard,
+            &mut progress::Discard,
             &should_interrupt,
-            Some(Box::new(move |oid, buf| db.find(oid, buf).ok().map(|t| t.0))),
+            Some(&db),
             pack::bundle::write::Options::default(),
         )?
         .data_path
-        .expect("directory set"),
+        .ok_or("pack data directory should be set")?,
         object_hash,
     )?;
     // TODO: figure out why these hashes change, also depending on the machine, even though they are indeed stable.
@@ -409,7 +410,7 @@ fn write_and_verify(
     // }
 
     bundle.verify_integrity(
-        progress::Discard,
+        &mut progress::Discard,
         &should_interrupt,
         gix_pack::index::verify::integrity::Options {
             verify_mode: pack::index::verify::Mode::HashCrc32DecodeEncode,

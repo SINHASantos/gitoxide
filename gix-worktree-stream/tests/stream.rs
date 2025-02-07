@@ -12,34 +12,44 @@ mod from_tree {
     };
 
     use gix_attributes::glob::pattern::Case;
-    use gix_object::{bstr::ByteSlice, tree::EntryMode};
-    use gix_odb::FindExt;
+    use gix_hash::oid;
+    use gix_object::{bstr::ByteSlice, tree::EntryKind, Data};
     use gix_testtools::once_cell::sync::Lazy;
     use gix_worktree::stack::state::attributes::Source;
 
     use crate::hex_to_id;
 
+    #[derive(Clone)]
+    struct FailObjectRetrieval;
+
+    impl gix_object::Find for FailObjectRetrieval {
+        fn try_find<'a>(
+            &self,
+            _id: &oid,
+            _buffer: &'a mut Vec<u8>,
+        ) -> Result<Option<Data<'a>>, gix_object::find::Error> {
+            Err(Box::new(Error::new(ErrorKind::Other, "object retrieval failed")))
+        }
+    }
+
     #[test]
     fn can_receive_err_if_root_is_not_found() {
         let mut stream = gix_worktree_stream::from_tree(
             gix_hash::Kind::Sha1.null(),
-            |_, _| Err(Error::new(ErrorKind::Other, "object retrieval failed")),
+            FailObjectRetrieval,
             mutating_pipeline(false),
             |_, _, _| -> Result<_, Infallible> { unreachable!("must not be called") },
         );
         let err = stream.next_entry().unwrap_err();
-        assert_eq!(err.to_string(), "Could not find a blob or tree for archival");
+        assert_eq!(err.to_string(), "Could not find a tree to traverse");
     }
 
     #[test]
     fn can_receive_err_if_attribute_not_found() -> gix_testtools::Result {
         let (_dir, head_tree, odb, _cache) = basic()?;
-        let mut stream = gix_worktree_stream::from_tree(
-            head_tree,
-            move |id, buf| odb.find(id, buf),
-            mutating_pipeline(false),
-            |_, _, _| Err(Error::new(ErrorKind::Other, "attribute retrieval failed")),
-        );
+        let mut stream = gix_worktree_stream::from_tree(head_tree, odb, mutating_pipeline(false), |_, _, _| {
+            Err(Error::new(ErrorKind::Other, "attribute retrieval failed"))
+        });
         let err = stream.next_entry().unwrap_err();
         assert_eq!(
             err.to_string(),
@@ -48,19 +58,21 @@ mod from_tree {
         Ok(())
     }
 
+    #[cfg(target_pointer_width = "64")]
+    const EXPECTED_BUFFER_LENGTH: usize = 320302;
+    #[cfg(target_pointer_width = "32")]
+    const EXPECTED_BUFFER_LENGTH: usize = 320198;
+
     #[test]
     fn will_provide_all_information_and_respect_export_ignore() -> gix_testtools::Result {
         let (dir, head_tree, odb, mut cache) = basic()?;
         let mut stream = gix_worktree_stream::from_tree(
             head_tree,
-            {
-                let odb = odb.clone();
-                move |id, buf| odb.find(id, buf)
-            },
+            odb.clone(),
             mutating_pipeline(true),
             move |rela_path, mode, attrs| {
                 cache
-                    .at_entry(rela_path, mode.is_tree().into(), |id, buf| odb.find_blob(id, buf))
+                    .at_entry(rela_path, Some(mode.into()), &odb)
                     .map(|entry| entry.matching_attributes(attrs))
                     .map(|_| ())
             },
@@ -81,7 +93,7 @@ mod from_tree {
         let mut stream = gix_worktree_stream::Stream::from_read(tee_read);
 
         while let Some(mut entry) = stream.next_entry().expect("entry retrieval does not fail") {
-            paths_and_modes.push((entry.relative_path().to_owned(), entry.mode, entry.id));
+            paths_and_modes.push((entry.relative_path().to_owned(), entry.mode.kind(), entry.id));
             let mut buf = Vec::new();
             entry.read_to_end(&mut buf).expect("stream can always be read");
             if !buf.is_empty() && entry.mode.is_blob() {
@@ -103,93 +115,83 @@ mod from_tree {
             }
         }
 
-        let expected_exe_mode = if cfg!(windows) {
-            EntryMode::Blob
-        } else {
-            EntryMode::BlobExecutable
-        };
-        let expected_link_mode = if cfg!(windows) {
-            EntryMode::Blob
-        } else {
-            EntryMode::Link
-        };
         assert_eq!(
             paths_and_modes,
             &[
                 (
                     ".gitattributes".into(),
-                    EntryMode::Blob,
+                    EntryKind::Blob,
                     hex_to_id("45c160c35c17ad264b96431cceb9793160396e99")
                 ),
                 (
                     "a".into(),
-                    EntryMode::Blob,
+                    EntryKind::Blob,
                     hex_to_id("45b983be36b73c0788dc9cbcb76cbb80fc7bb057")
                 ),
                 (
                     "bigfile".into(),
-                    EntryMode::Blob,
+                    EntryKind::Blob,
                     hex_to_id("4995fde49ed64e043977e22539f66a0d372dd129")
                 ),
                 (
                     "symlink-to-a".into(),
-                    expected_link_mode,
-                    hex_to_id(if cfg!(windows) {
-                        "45b983be36b73c0788dc9cbcb76cbb80fc7bb057"
-                    } else {
-                        "2e65efe2a145dda7ee51d1741299f848e5bf752e"
-                    })
+                    EntryKind::Link,
+                    hex_to_id("2e65efe2a145dda7ee51d1741299f848e5bf752e")
                 ),
                 (
                     "dir/.gitattributes".into(),
-                    EntryMode::Blob,
+                    EntryKind::Blob,
                     hex_to_id("81b9a375276405703e05be6cecf0fc1c8b8eed64")
                 ),
                 (
                     "dir/b".into(),
-                    EntryMode::Blob,
+                    EntryKind::Blob,
                     hex_to_id("ab4a98190cf776b43cb0fe57cef231fb93fd07e6")
                 ),
                 (
                     "dir/subdir/exe".into(),
-                    expected_exe_mode,
+                    EntryKind::BlobExecutable,
                     hex_to_id("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391")
                 ),
                 (
                     "dir/subdir/streamed".into(),
-                    EntryMode::Blob,
+                    EntryKind::Blob,
                     hex_to_id("08991f58f4de5d85b61c0f87f3ac053c79d0e739")
                 ),
                 (
                     "extra-file".into(),
-                    EntryMode::Blob,
+                    EntryKind::Blob,
                     hex_to_id("0000000000000000000000000000000000000000")
                 ),
                 (
                     "extra-bigfile".into(),
-                    EntryMode::Blob,
+                    EntryKind::Blob,
                     hex_to_id("0000000000000000000000000000000000000000")
                 ),
                 (
                     "extra-exe".into(),
-                    expected_exe_mode,
+                    if cfg!(windows) {
+                        EntryKind::Blob
+                    } else {
+                        EntryKind::BlobExecutable
+                    },
                     hex_to_id("0000000000000000000000000000000000000000")
                 ),
                 (
                     "extra-dir-empty".into(),
-                    EntryMode::Tree,
+                    EntryKind::Tree,
                     hex_to_id("0000000000000000000000000000000000000000")
                 ),
                 (
                     "extra-dir/symlink-to-extra".into(),
-                    expected_link_mode,
+                    EntryKind::Link,
                     hex_to_id("0000000000000000000000000000000000000000")
                 )
             ]
         );
         assert_eq!(
             copy.lock().len(),
-            320302,
+            EXPECTED_BUFFER_LENGTH,
             "keep track of file size changes of the streaming format"
         );
 
@@ -198,7 +200,7 @@ mod from_tree {
         let mut copied_paths_and_modes = Vec::new();
         let mut buf = Vec::new();
         while let Some(mut entry) = copied_stream.next_entry().expect("entry retrieval does not fail") {
-            copied_paths_and_modes.push((entry.relative_path().to_owned(), entry.mode, entry.id));
+            copied_paths_and_modes.push((entry.relative_path().to_owned(), entry.mode.kind(), entry.id));
             buf.clear();
             entry.read_to_end(&mut buf).expect("stream can always be read");
         }
@@ -214,14 +216,11 @@ mod from_tree {
         let (_dir, head_tree, odb, mut cache) = basic()?;
         let mut stream = gix_worktree_stream::from_tree(
             head_tree,
-            {
-                let odb = odb.clone();
-                move |id, buf| odb.find(id, buf)
-            },
+            odb.clone(),
             mutating_pipeline(false),
             move |rela_path, mode, attrs| {
                 cache
-                    .at_entry(rela_path, mode.is_tree().into(), |id, buf| odb.find_blob(id, buf))
+                    .at_entry(rela_path, Some(mode.into()), &odb)
                     .map(|entry| entry.matching_attributes(attrs))
                     .map(|_| ())
             },
@@ -255,7 +254,7 @@ mod from_tree {
 
     fn mutating_pipeline(driver: bool) -> gix_filter::Pipeline {
         gix_filter::Pipeline::new(
-            &Default::default(),
+            Default::default(),
             gix_filter::pipeline::Options {
                 drivers: if driver { vec![driver_with_process()] } else { vec![] },
                 eol_config: gix_filter::eol::Configuration {

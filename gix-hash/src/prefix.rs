@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, convert::TryFrom};
+use std::cmp::Ordering;
 
 use crate::{oid, ObjectId, Prefix};
 
@@ -41,8 +41,7 @@ impl Prefix {
     ///
     /// For instance, with `hex_len` of 7 the resulting prefix is 3.5 bytes, or 3 bytes and 4 bits
     /// wide, with all other bytes and bits set to zero.
-    pub fn new(id: impl AsRef<oid>, hex_len: usize) -> Result<Self, Error> {
-        let id = id.as_ref();
+    pub fn new(id: &oid, hex_len: usize) -> Result<Self, Error> {
         if hex_len > id.kind().len_in_hex() {
             Err(Error::TooLong {
                 object_kind: id.kind(),
@@ -116,7 +115,7 @@ impl Prefix {
             faster_hex::hex_decode(src, &mut out).map(move |_| out)
         }
         .map_err(|e| match e {
-            faster_hex::Error::InvalidChar => from_hex::Error::Invalid,
+            faster_hex::Error::InvalidChar | faster_hex::Error::Overflow => from_hex::Error::Invalid,
             faster_hex::Error::InvalidLength(_) => panic!("This is already checked"),
         })?;
 

@@ -1,6 +1,6 @@
 use std::{fs, io};
 
-use gix_features::{hash::Sha1, zlib::Decompress};
+use gix_features::{hash::Hasher, zlib::Decompress};
 use gix_hash::ObjectId;
 
 use crate::data::input;
@@ -15,7 +15,7 @@ pub struct BytesToEntriesIter<BR> {
     had_error: bool,
     version: crate::data::Version,
     objects_left: u32,
-    hash: Option<Sha1>,
+    hash: Option<Hasher>,
     mode: input::Mode,
     compressed: input::EntryDataMode,
     compressed_buf: Option<Vec<u8>>,
@@ -138,7 +138,7 @@ where
 
         let crc32 = if self.compressed.crc32() {
             let mut header_buf = [0u8; 12 + gix_hash::Kind::longest().len_in_bytes()];
-            let header_len = entry.header.write_to(bytes_copied, header_buf.as_mut())?;
+            let header_len = entry.header.write_to(bytes_copied, &mut header_buf.as_mut())?;
             let state = gix_features::hash::crc32_update(0, &header_buf[..header_len]);
             Some(gix_features::hash::crc32_update(state, &compressed))
         } else {
@@ -254,7 +254,7 @@ where
         self.write
             .write_all(&buf[..amt])
             .expect("a write to never fail - should be a memory buffer");
-        self.read.consume(amt)
+        self.read.consume(amt);
     }
 }
 
@@ -291,7 +291,7 @@ pub struct DecompressRead<'a, R> {
     pub decompressor: &'a mut Decompress,
 }
 
-impl<'a, R> io::Read for DecompressRead<'a, R>
+impl<R> io::Read for DecompressRead<'_, R>
 where
     R: io::BufRead,
 {
@@ -303,12 +303,12 @@ where
 /// A utility to automatically generate a hash while writing into an inner writer.
 pub struct HashWrite<'a, T> {
     /// The hash implementation.
-    pub hash: &'a mut Sha1,
+    pub hash: &'a mut Hasher,
     /// The inner writer.
     pub inner: T,
 }
 
-impl<'a, T> std::io::Write for HashWrite<'a, T>
+impl<T> std::io::Write for HashWrite<'_, T>
 where
     T: std::io::Write,
 {

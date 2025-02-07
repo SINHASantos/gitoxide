@@ -1,6 +1,8 @@
 #![allow(clippy::result_large_err)]
+
 use super::{util, Error};
-use crate::config::tree::{Core, Extensions};
+use crate::config::cache::util::{ApplyLeniency, ApplyLeniencyDefaultValue};
+use crate::config::tree::{gitoxide, Core, Extensions};
 
 /// A utility to deal with the cyclic dependency between the ref store and the configuration. The ref-store needs the
 /// object hash kind, and the configuration needs the current branch name to resolve conditional includes with `onbranch`.
@@ -12,6 +14,8 @@ pub(crate) struct StageOne {
     pub lossy: Option<bool>,
     pub object_hash: gix_hash::Kind,
     pub reflog: Option<gix_ref::store::WriteReflog>,
+    pub precompose_unicode: bool,
+    pub protect_windows: bool,
 }
 
 /// Initialization
@@ -37,7 +41,7 @@ impl StageOne {
         // the repo doesn't have a configuration file.
         let is_bare = util::config_bool(&config, &Core::BARE, "core.bare", true, lenient)?;
         let repo_format_version = config
-            .integer_by_key("core.repositoryFormatVersion")
+            .integer("core.repositoryFormatVersion")
             .map(|version| Core::REPOSITORY_FORMAT_VERSION.try_into_usize(version))
             .transpose()?
             .unwrap_or_default();
@@ -45,7 +49,7 @@ impl StageOne {
             .then_some(Ok(gix_hash::Kind::Sha1))
             .or_else(|| {
                 config
-                    .string("extensions", None, "objectFormat")
+                    .string(Extensions::OBJECT_FORMAT)
                     .map(|format| Extensions::OBJECT_FORMAT.try_into_object_format(format))
             })
             .transpose()?
@@ -69,6 +73,22 @@ impl StageOne {
             )?;
             config.append(worktree_config);
         };
+        let precompose_unicode = config
+            .boolean(&Core::PRECOMPOSE_UNICODE)
+            .map(|v| Core::PRECOMPOSE_UNICODE.enrich_error(v))
+            .transpose()
+            .with_leniency(lenient)
+            .map_err(Error::ConfigBoolean)?
+            .unwrap_or_default();
+
+        const IS_WINDOWS: bool = cfg!(windows);
+        let protect_windows = gitoxide::Core::PROTECT_WINDOWS
+            .enrich_error(
+                config
+                    .boolean(gitoxide::Core::PROTECT_WINDOWS)
+                    .unwrap_or(Ok(IS_WINDOWS)),
+            )
+            .with_lenient_default_value(lenient, IS_WINDOWS)?;
 
         let reflog = util::query_refupdates(&config, lenient)?;
         Ok(StageOne {
@@ -78,6 +98,8 @@ impl StageOne {
             lossy,
             object_hash,
             reflog,
+            precompose_unicode,
+            protect_windows,
         })
     }
 }
@@ -102,7 +124,7 @@ fn load_config(
                 path: config_path,
             };
             if lenient {
-                log::warn!("ignoring: {err:#?}");
+                gix_trace::warn!("ignoring: {err:#?}");
                 return Ok(gix_config::File::new(metadata));
             } else {
                 return Err(err);
@@ -117,7 +139,7 @@ fn load_config(
             path: config_path,
         };
         if lenient {
-            log::warn!("ignoring: {err:#?}");
+            gix_trace::warn!("ignoring: {err:#?}");
             buf.clear();
         } else {
             return Err(err);

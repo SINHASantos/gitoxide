@@ -1,4 +1,4 @@
-use std::{borrow::Cow, convert::TryFrom, path::Path};
+use std::{borrow::Cow, path::Path};
 
 /// The error returned by [ask()][crate::ask()].
 #[derive(Debug, thiserror::Error)]
@@ -59,11 +59,11 @@ impl Options<'_> {
         use_git_terminal_prompt: bool,
     ) -> Self {
         if let Some(askpass) = use_git_askpass.then(|| std::env::var_os("GIT_ASKPASS")).flatten() {
-            self.askpass = Some(Cow::Owned(askpass.into()))
+            self.askpass = Some(Cow::Owned(askpass.into()));
         }
         if self.askpass.is_none() {
             if let Some(askpass) = use_ssh_askpass.then(|| std::env::var_os("SSH_ASKPASS")).flatten() {
-                self.askpass = Some(Cow::Owned(askpass.into()))
+                self.askpass = Some(Cow::Owned(askpass.into()));
             }
         }
         self.mode = use_git_terminal_prompt

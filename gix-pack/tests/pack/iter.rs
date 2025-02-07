@@ -1,11 +1,13 @@
 use gix_odb::pack;
+use gix_testtools::size_ok;
 
 #[test]
 fn size_of_entry() {
-    assert_eq!(
-        std::mem::size_of::<pack::data::input::Entry>(),
-        104,
-        "let's keep the size in check as we have many of them"
+    let actual = std::mem::size_of::<pack::data::input::Entry>();
+    let expected = 104;
+    assert!(
+        size_ok(actual, expected),
+        "let's keep the size in check as we have many of them: {actual} <~ {expected}"
     );
 }
 
@@ -37,7 +39,7 @@ mod new_from_header {
                 let mut buf = Vec::<u8>::new();
                 entry.header.write_to(entry.decompressed_size, &mut buf)?;
                 let new_entry =
-                    pack::data::Entry::from_bytes(&buf, entry.pack_offset, gix_hash::Kind::Sha1.len_in_bytes());
+                    pack::data::Entry::from_bytes(&buf, entry.pack_offset, gix_hash::Kind::Sha1.len_in_bytes())?;
 
                 assert_eq!(
                     new_entry.header_size(),

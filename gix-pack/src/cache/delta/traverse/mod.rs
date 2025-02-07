@@ -2,13 +2,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use gix_features::{
     parallel::in_parallel_with_slice,
-    progress::{self, Progress},
+    progress::{self, DynNestedProgress, Progress},
     threading,
     threading::{Mutable, OwnShared},
 };
 
 use crate::{
-    cache::delta::{traverse::util::ItemSliceSend, Item, Tree},
+    cache::delta::{traverse::util::ItemSliceSync, Item, Tree},
     data::EntryRange,
 };
 
@@ -26,6 +26,8 @@ pub enum Error {
     },
     #[error("The resolver failed to obtain the pack entry bytes for the entry at {pack_offset}")]
     ResolveFailed { pack_offset: u64 },
+    #[error(transparent)]
+    EntryType(#[from] crate::data::entry::decode::Error),
     #[error("One of the object inspectors failed")]
     Inspect(#[from] Box<dyn std::error::Error + Send + Sync>),
     #[error("Interrupted")]
@@ -55,11 +57,11 @@ pub struct Context<'a> {
 }
 
 /// Options for [`Tree::traverse()`].
-pub struct Options<'a, P1, P2> {
+pub struct Options<'a, 's> {
     /// is a progress instance to track progress for each object in the traversal.
-    pub object_progress: P1,
+    pub object_progress: Box<dyn DynNestedProgress>,
     /// is a progress instance to track the overall progress.
-    pub size_progress: P2,
+    pub size_progress: &'s mut dyn Progress,
     /// If `Some`, only use the given amount of threads. Otherwise, the amount of threads to use will be selected based on
     /// the amount of available logical cores.
     pub thread_limit: Option<usize>,
@@ -99,7 +101,7 @@ where
     /// This method returns a vector of all tree items, along with their potentially modified custom node data.
     ///
     /// _Note_ that this method consumed the Tree to assure safe parallel traversal with mutation support.
-    pub fn traverse<F, P1, P2, MBFN, E, R>(
+    pub fn traverse<F, MBFN, E, R>(
         mut self,
         resolve: F,
         resolve_data: &R,
@@ -108,17 +110,15 @@ where
         Options {
             thread_limit,
             mut object_progress,
-            mut size_progress,
+            size_progress,
             should_interrupt,
             object_hash,
-        }: Options<'_, P1, P2>,
+        }: Options<'_, '_>,
     ) -> Result<Outcome<T>, Error>
     where
         F: for<'r> Fn(EntryRange, &'r R) -> Option<&'r [u8]> + Send + Clone,
         R: Send + Sync,
-        P1: Progress,
-        P2: Progress,
-        MBFN: FnMut(&mut T, &<P1 as Progress>::SubProgress, Context<'_>) -> Result<(), E> + Send + Clone,
+        MBFN: FnMut(&mut T, &dyn Progress, Context<'_>) -> Result<(), E> + Send + Clone,
         E: std::error::Error + Send + Sync + 'static,
     {
         self.set_pack_entries_end_and_resolve_ref_offsets(pack_entries_end)?;
@@ -131,45 +131,48 @@ where
         };
         size_progress.init(None, progress::bytes());
         let size_counter = size_progress.counter();
-        let child_items = self.child_items.as_mut_slice();
         let object_progress = OwnShared::new(Mutable::new(object_progress));
 
         let start = std::time::Instant::now();
+        let (mut root_items, mut child_items_vec) = self.take_root_and_child();
+        let child_items = ItemSliceSync::new(&mut child_items_vec);
+        let child_items = &child_items;
         in_parallel_with_slice(
-            &mut self.root_items,
+            &mut root_items,
             thread_limit,
             {
-                let child_items = ItemSliceSend(std::ptr::slice_from_raw_parts_mut(
-                    child_items.as_mut_ptr(),
-                    child_items.len(),
-                ));
                 {
                     let object_progress = object_progress.clone();
-                    move |thread_index| {
-                        let _ = &child_items;
-                        resolve::State {
-                            delta_bytes: Vec::<u8>::with_capacity(4096),
-                            fully_resolved_delta_bytes: Vec::<u8>::with_capacity(4096),
-                            progress: threading::lock(&object_progress).add_child(format!("thread {thread_index}")),
-                            resolve: resolve.clone(),
-                            modify_base: inspect_object.clone(),
-                            child_items: child_items.clone(),
-                        }
+                    move |thread_index| resolve::State {
+                        delta_bytes: Vec::<u8>::with_capacity(4096),
+                        fully_resolved_delta_bytes: Vec::<u8>::with_capacity(4096),
+                        progress: Box::new(
+                            threading::lock(&object_progress).add_child(format!("thread {thread_index}")),
+                        ),
+                        resolve: resolve.clone(),
+                        modify_base: inspect_object.clone(),
+                        child_items,
                     }
                 }
             },
             {
                 move |node, state, threads_left, should_interrupt| {
-                    resolve::deltas(
-                        object_counter.clone(),
-                        size_counter.clone(),
-                        node,
-                        state,
-                        resolve_data,
-                        object_hash.len_in_bytes(),
-                        threads_left,
-                        should_interrupt,
-                    )
+                    // SAFETY: This invariant is upheld since `child_items` and `node` come from the same Tree.
+                    // This means we can rely on Tree's invariant that node.children will be the only `children` array in
+                    // for nodes in this tree that will contain any of those children.
+                    #[allow(unsafe_code)]
+                    unsafe {
+                        resolve::deltas(
+                            object_counter.clone(),
+                            size_counter.clone(),
+                            node,
+                            state,
+                            resolve_data,
+                            object_hash.len_in_bytes(),
+                            threads_left,
+                            should_interrupt,
+                        )
+                    }
                 }
             },
             || (!should_interrupt.load(Ordering::Relaxed)).then(|| std::time::Duration::from_millis(50)),
@@ -180,8 +183,8 @@ where
         size_progress.show_throughput(start);
 
         Ok(Outcome {
-            roots: self.root_items,
-            children: self.child_items,
+            roots: root_items,
+            children: child_items_vec,
         })
     }
 }

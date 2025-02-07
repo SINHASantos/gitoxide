@@ -11,7 +11,7 @@ mod write_to {
                 time: default_time(),
             };
             assert_eq!(
-                format!("{:?}", signature.write_to(Vec::new())),
+                format!("{:?}", signature.write_to(&mut Vec::new())),
                 "Err(Custom { kind: Other, error: IllegalCharacter })"
             );
         }
@@ -24,7 +24,7 @@ mod write_to {
                 time: default_time(),
             };
             assert_eq!(
-                format!("{:?}", signature.write_to(Vec::new())),
+                format!("{:?}", signature.write_to(&mut Vec::new())),
                 "Err(Custom { kind: Other, error: IllegalCharacter })"
             );
         }
@@ -37,7 +37,7 @@ mod write_to {
                 time: default_time(),
             };
             assert_eq!(
-                format!("{:?}", signature.write_to(Vec::new())),
+                format!("{:?}", signature.write_to(&mut Vec::new())),
                 "Err(Custom { kind: Other, error: IllegalCharacter })"
             );
         }
@@ -53,7 +53,7 @@ mod write_to {
 }
 
 use bstr::ByteSlice;
-use gix_actor::Signature;
+use gix_actor::{Signature, SignatureRef};
 
 #[test]
 fn trim() {
@@ -79,4 +79,43 @@ fn round_trip() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(output.as_bstr(), input.as_bstr());
     }
     Ok(())
+}
+
+#[test]
+fn parse_timestamp_with_trailing_digits() {
+    let signature = gix_actor::SignatureRef::from_bytes::<()>(b"first last <name@example.com> 1312735823 +051800")
+        .expect("deal with trailing zeroes in timestamp by discarding it");
+    assert_eq!(
+        signature,
+        SignatureRef {
+            name: "first last".into(),
+            email: "name@example.com".into(),
+            time: gix_actor::date::Time::new(1312735823, 0),
+        }
+    );
+
+    let signature = gix_actor::SignatureRef::from_bytes::<()>(b"first last <name@example.com> 1312735823 +0518")
+        .expect("this naturally works as the timestamp does not have trailing zeroes");
+    assert_eq!(
+        signature,
+        SignatureRef {
+            name: "first last".into(),
+            email: "name@example.com".into(),
+            time: gix_actor::date::Time::new(1312735823, 19080),
+        }
+    );
+}
+
+#[test]
+fn parse_missing_timestamp() {
+    let signature = gix_actor::SignatureRef::from_bytes::<()>(b"first last <name@example.com>")
+        .expect("deal with missing timestamp in signature by zeroing it");
+    assert_eq!(
+        signature,
+        SignatureRef {
+            name: "first last".into(),
+            email: "name@example.com".into(),
+            time: gix_actor::date::Time::new(0, 0),
+        }
+    );
 }

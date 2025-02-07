@@ -1,4 +1,4 @@
-use std::{convert::TryInto, ops::Range};
+use std::ops::Range;
 
 mod error {
     /// The value returned by [`crate::file::Index::from_bytes()`]
@@ -81,7 +81,7 @@ impl file::Index {
                     start: offset,
                     end: next_offset,
                 },
-            })
+            });
         }
 
         let sentinel = to_kind(&toc_entry[..4]);

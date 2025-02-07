@@ -1,5 +1,4 @@
 use std::{
-    convert::TryFrom,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -54,14 +53,14 @@ struct PathCursor<'a>(&'a mut PathBuf);
 
 struct NewDir<'a>(&'a mut PathBuf);
 
-impl<'a> PathCursor<'a> {
+impl PathCursor<'_> {
     fn at(&mut self, component: &str) -> &Path {
         self.0.push(component);
         self.0.as_path()
     }
 }
 
-impl<'a> NewDir<'a> {
+impl NewDir<'_> {
     fn at(self, component: &str) -> Result<Self, Error> {
         self.0.push(component);
         create_dir(self.0)?;
@@ -72,13 +71,13 @@ impl<'a> NewDir<'a> {
     }
 }
 
-impl<'a> Drop for NewDir<'a> {
+impl Drop for NewDir<'_> {
     fn drop(&mut self) {
         self.0.pop();
     }
 }
 
-impl<'a> Drop for PathCursor<'a> {
+impl Drop for PathCursor<'_> {
     fn drop(&mut self) {
         self.0.pop();
     }
@@ -88,6 +87,7 @@ fn write_file(data: &[u8], path: &Path) -> Result<(), Error> {
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(true)
         .append(false)
         .open(path)
         .map_err(|e| Error::IoOpen {
@@ -203,9 +203,9 @@ pub fn into(
         write_file(tpl, PathCursor(&mut dot_git).at(filename))?;
     }
 
-    {
+    let caps = {
         let mut config = gix_config::File::default();
-        {
+        let caps = {
             let caps = fs_capabilities.unwrap_or_else(|| gix_fs::Capabilities::probe(&dot_git));
             let mut core = config.new_section("core", None).expect("valid section name");
 
@@ -216,29 +216,31 @@ pub fn into(
             core.push(key("symlinks"), Some(bool(caps.symlink).into()));
             core.push(key("ignorecase"), Some(bool(caps.ignore_case).into()));
             core.push(key("precomposeunicode"), Some(bool(caps.precompose_unicode).into()));
-        }
+            caps
+        };
         let mut cursor = PathCursor(&mut dot_git);
         let config_path = cursor.at("config");
         std::fs::write(config_path, config.to_bstring()).map_err(|err| Error::IoWrite {
             source: err,
             path: config_path.to_owned(),
         })?;
-    }
+        caps
+    };
 
     Ok(gix_discover::repository::Path::from_dot_git_dir(
         dot_git,
         if bare {
-            gix_discover::repository::Kind::Bare
+            gix_discover::repository::Kind::PossiblyBare
         } else {
             gix_discover::repository::Kind::WorkTree { linked_git_dir: None }
         },
-        std::env::current_dir()?,
+        &gix_fs::current_dir(caps.precompose_unicode)?,
     )
     .expect("by now the `dot_git` dir is valid as we have accessed it"))
 }
 
-fn key(name: &'static str) -> section::Key<'static> {
-    section::Key::try_from(name).expect("valid key name")
+fn key(name: &'static str) -> section::ValueName<'static> {
+    section::ValueName::try_from(name).expect("valid key name")
 }
 
 fn bool(v: bool) -> &'static str {

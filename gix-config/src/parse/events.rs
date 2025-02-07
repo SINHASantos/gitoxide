@@ -1,10 +1,8 @@
-use std::convert::TryFrom;
-
 use smallvec::SmallVec;
 
 use crate::{
     parse,
-    parse::{section, Event, Section},
+    parse::{Event, Section},
 };
 
 /// A type store without allocation all events that are typically preceding the first section.
@@ -30,26 +28,26 @@ pub type FrontMatterEvents<'a> = SmallVec<[Event<'a>; 8]>;
 ///
 /// For concrete examples, some notable differences are:
 /// - `git-config` sections permit subsections via either a quoted string
-/// (`[some-section "subsection"]`) or via the deprecated dot notation
-/// (`[some-section.subsection]`). Successful parsing these section names is not
-/// well defined in typical `.ini` parsers. This parser will handle these cases
-/// perfectly.
+///   (`[some-section "subsection"]`) or via the deprecated dot notation
+///   (`[some-section.subsection]`). Successful parsing these section names is not
+///   well defined in typical `.ini` parsers. This parser will handle these cases
+///   perfectly.
 /// - Comment markers are not strictly defined either. This parser will always
-/// and only handle a semicolon or octothorpe (also known as a hash or number
-/// sign).
+///   and only handle a semicolon or octothorpe (also known as a hash or number
+///   sign).
 /// - Global properties may be allowed in `.ini` parsers, but is strictly
-/// disallowed by this parser.
+///   disallowed by this parser.
 /// - Only `\t`, `\n`, `\b` `\\` are valid escape characters.
 /// - Quoted and semi-quoted values will be parsed (but quotes will be included
-/// in event outputs). An example of a semi-quoted value is `5"hello world"`,
-/// which should be interpreted as `5hello world` after
-/// [normalization][crate::value::normalize()].
+///   in event outputs). An example of a semi-quoted value is `5"hello world"`,
+///   which should be interpreted as `5hello world` after
+///   [normalization][crate::value::normalize()].
 /// - Line continuations via a `\` character is supported (inside or outside of quotes)
 /// - Whitespace handling similarly follows the `git-config` specification as
-/// closely as possible, where excess whitespace after a non-quoted value are
-/// trimmed, and line continuations onto a new line with excess spaces are kept.
+///   closely as possible, where excess whitespace after a non-quoted value are
+///   trimmed, and line continuations onto a new line with excess spaces are kept.
 /// - Only equal signs (optionally padded by spaces) are valid name/value
-/// delimiters.
+///   delimiters.
 ///
 /// Note that things such as case-sensitivity or duplicate sections are
 /// _not_ handled. This parser is a low level _syntactic_ interpreter
@@ -64,8 +62,8 @@ pub type FrontMatterEvents<'a> = SmallVec<[Event<'a>; 8]>;
 /// # Trait Implementations
 ///
 /// - This struct does _not_ implement [`FromStr`] due to lifetime
-/// constraints implied on the required `from_str` method. Instead, it provides
-/// [`From<&'_ str>`].
+///   constraints implied on the required `from_str` method. Instead, it provides
+///   [`From<&'_ str>`].
 ///
 /// # Idioms
 ///
@@ -94,7 +92,7 @@ pub type FrontMatterEvents<'a> = SmallVec<[Event<'a>; 8]>;
 /// Event::SectionHeader(section_header),
 /// Event::Newline(Cow::Borrowed("\n".into())),
 /// Event::Whitespace(Cow::Borrowed("  ".into())),
-/// Event::SectionKey(section::Key::try_from("autocrlf")?),
+/// Event::SectionValueName(section::ValueName::try_from("autocrlf")?),
 /// Event::Whitespace(Cow::Borrowed(" ".into())),
 /// Event::KeyValueSeparator,
 /// Event::Whitespace(Cow::Borrowed(" ".into())),
@@ -131,7 +129,7 @@ pub type FrontMatterEvents<'a> = SmallVec<[Event<'a>; 8]>;
 /// Event::SectionHeader(section_header),
 /// Event::Newline(Cow::Borrowed("\n".into())),
 /// Event::Whitespace(Cow::Borrowed("  ".into())),
-/// Event::SectionKey(section::Key::try_from("autocrlf")?),
+/// Event::SectionValueName(section::ValueName::try_from("autocrlf")?),
 /// Event::Value(Cow::Borrowed("".into())),
 /// # ]);
 /// # Ok::<_, Box<dyn std::error::Error>>(())
@@ -162,11 +160,11 @@ pub type FrontMatterEvents<'a> = SmallVec<[Event<'a>; 8]>;
 /// # assert_eq!(Events::from_str(section_data).unwrap().into_vec(), vec![
 /// Event::SectionHeader(section_header),
 /// Event::Newline(Cow::Borrowed("\n".into())),
-/// Event::SectionKey(section::Key::try_from("autocrlf")?),
+/// Event::SectionValueName(section::ValueName::try_from("autocrlf")?),
 /// Event::KeyValueSeparator,
 /// Event::Value(Cow::Borrowed(r#"true"""#.into())),
 /// Event::Newline(Cow::Borrowed("\n".into())),
-/// Event::SectionKey(section::Key::try_from("filemode")?),
+/// Event::SectionValueName(section::ValueName::try_from("filemode")?),
 /// Event::KeyValueSeparator,
 /// Event::Value(Cow::Borrowed(r#"fa"lse""#.into())),
 /// # ]);
@@ -197,7 +195,7 @@ pub type FrontMatterEvents<'a> = SmallVec<[Event<'a>; 8]>;
 /// # assert_eq!(Events::from_str(section_data).unwrap().into_vec(), vec![
 /// Event::SectionHeader(section_header),
 /// Event::Newline(Cow::Borrowed("\n".into())),
-/// Event::SectionKey(section::Key::try_from("file")?),
+/// Event::SectionValueName(section::ValueName::try_from("file")?),
 /// Event::KeyValueSeparator,
 /// Event::ValueNotDone(Cow::Borrowed("a".into())),
 /// Event::Newline(Cow::Borrowed("\n".into())),
@@ -229,7 +227,7 @@ impl Events<'static> {
         input: &'a [u8],
         filter: Option<fn(&Event<'a>) -> bool>,
     ) -> Result<Events<'static>, parse::Error> {
-        from_bytes(input, |e| e.to_owned(), filter)
+        from_bytes(input, &|e| e.to_owned(), filter)
     }
 }
 
@@ -241,7 +239,7 @@ impl<'a> Events<'a> {
     ///
     /// Use `filter` to only include those events for which it returns true.
     pub fn from_bytes(input: &'a [u8], filter: Option<fn(&Event<'a>) -> bool>) -> Result<Events<'a>, parse::Error> {
-        from_bytes(input, std::convert::identity, filter)
+        from_bytes(input, &std::convert::identity, filter)
     }
 
     /// Attempt to zero-copy parse the provided `input` string.
@@ -256,7 +254,7 @@ impl<'a> Events<'a> {
     /// Consumes the parser to produce an iterator of all contained events.
     #[must_use = "iterators are lazy and do nothing unless consumed"]
     #[allow(clippy::should_implement_trait)]
-    pub fn into_iter(self) -> impl Iterator<Item = parse::Event<'a>> + std::iter::FusedIterator {
+    pub fn into_iter(self) -> impl std::iter::FusedIterator<Item = parse::Event<'a>> {
         self.frontmatter.into_iter().chain(
             self.sections
                 .into_iter()
@@ -288,14 +286,14 @@ impl<'a> TryFrom<&'a [u8]> for Events<'a> {
 
 fn from_bytes<'a, 'b>(
     input: &'a [u8],
-    convert: impl Fn(Event<'a>) -> Event<'b>,
+    convert: &dyn Fn(Event<'a>) -> Event<'b>,
     filter: Option<fn(&Event<'a>) -> bool>,
 ) -> Result<Events<'b>, parse::Error> {
     let mut header = None;
-    let mut events = section::Events::default();
+    let mut events = Vec::with_capacity(256);
     let mut frontmatter = FrontMatterEvents::default();
     let mut sections = Vec::new();
-    parse::from_bytes(input, |e: Event<'_>| match e {
+    parse::from_bytes(input, &mut |e: Event<'_>| match e {
         Event::SectionHeader(next_header) => {
             match header.take() {
                 None => {
@@ -316,7 +314,7 @@ fn from_bytes<'a, 'b>(
         }
         event => {
             if filter.map_or(true, |f| f(&event)) {
-                events.push(convert(event))
+                events.push(convert(event));
             }
         }
     })?;

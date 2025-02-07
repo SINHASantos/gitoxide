@@ -1,6 +1,6 @@
 use std::{io::Read, path::Path};
 
-use bstr::{BStr, ByteSlice};
+use bstr::ByteSlice;
 use gix_filter::{eol, pipeline::CrlfRoundTripCheck};
 
 use crate::{driver::apply::driver_with_process, pipeline::pipeline};
@@ -19,11 +19,11 @@ fn no_driver_but_filter_with_autocrlf() -> gix_testtools::Result {
         )
     })?;
 
-    let out = pipe.convert_to_git(
+    let mut out = pipe.convert_to_git(
         "hi\r\n".as_bytes(),
         Path::new("any.txt"),
-        |_path, _attrs| {},
-        no_object_in_index,
+        &mut |_path, _attrs| {},
+        &mut no_object_in_index,
     )?;
 
     assert_eq!(
@@ -31,6 +31,9 @@ fn no_driver_but_filter_with_autocrlf() -> gix_testtools::Result {
         "hi\n",
         "the read is read into memory if there is no driver"
     );
+    let mut buf = Vec::new();
+    out.read_to_end(&mut buf)?;
+    assert_eq!(buf.as_bstr(), "hi\n", "we can consume the output");
     Ok(())
 }
 
@@ -48,15 +51,13 @@ fn all_stages_mean_streaming_is_impossible() -> gix_testtools::Result {
     let mut out = pipe.convert_to_git(
         "➡a\r\n➡b\r\n➡$Id: 2188d1cdee2b93a80084b61af431a49d21bc7cc0$".as_bytes(),
         Path::new("any.txt"),
-        |path, attrs| {
+        &mut |path, attrs| {
             cache
-                .at_entry(path, Some(false), |_oid, _buf| -> Result<_, std::convert::Infallible> {
-                    unreachable!("index access disabled")
-                })
+                .at_entry(path, None, &gix_object::find::Never)
                 .expect("cannot fail")
                 .matching_attributes(attrs);
         },
-        no_object_in_index,
+        &mut no_object_in_index,
     )?;
     assert!(out.is_changed(), "filters were applied");
     assert!(out.as_read().is_none(), "non-driver filters operate in-memory");
@@ -79,15 +80,13 @@ fn only_driver_means_streaming_is_possible() -> gix_testtools::Result {
     let mut out = pipe.convert_to_git(
         "➡a\r\n➡b\r\n➡$Id: 2188d1cdee2b93a80084b61af431a49d21bc7cc0$".as_bytes(),
         Path::new("subdir/doesnot/matter/any.txt"),
-        |path, attrs| {
+        &mut |path, attrs| {
             cache
-                .at_entry(path, Some(false), |_oid, _buf| -> Result<_, std::convert::Infallible> {
-                    unreachable!("index access disabled")
-                })
+                .at_entry(path, None, &gix_object::find::Never)
                 .expect("cannot fail")
                 .matching_attributes(attrs);
         },
-        no_object_in_index,
+        &mut no_object_in_index,
     )?;
     assert!(out.is_changed(), "filters were applied");
     assert!(out.as_read().is_some(), "filter-only can be streamed");
@@ -111,15 +110,13 @@ fn no_filter_means_reader_is_returned_unchanged() -> gix_testtools::Result {
     let mut out = pipe.convert_to_git(
         input.as_bytes(),
         Path::new("other.txt"),
-        |path, attrs| {
+        &mut |path, attrs| {
             cache
-                .at_entry(path, Some(false), |_oid, _buf| -> Result<_, std::convert::Infallible> {
-                    unreachable!("index access disabled")
-                })
+                .at_entry(path, None, &gix_object::find::Never)
                 .expect("cannot fail")
                 .matching_attributes(attrs);
         },
-        no_call,
+        &mut no_call,
     )?;
     assert!(!out.is_changed(), "no filter was applied");
     let actual = out
@@ -132,11 +129,11 @@ fn no_filter_means_reader_is_returned_unchanged() -> gix_testtools::Result {
 }
 
 #[allow(clippy::ptr_arg)]
-fn no_call(_path: &BStr, _buf: &mut Vec<u8>) -> std::io::Result<Option<()>> {
+fn no_call(_buf: &mut Vec<u8>) -> Result<Option<()>, Box<dyn std::error::Error + Send + Sync>> {
     unreachable!("index function will not be called")
 }
 
 #[allow(clippy::ptr_arg)]
-fn no_object_in_index(_path: &BStr, _buf: &mut Vec<u8>) -> std::io::Result<Option<()>> {
+fn no_object_in_index(_buf: &mut Vec<u8>) -> Result<Option<()>, Box<dyn std::error::Error + Send + Sync>> {
     Ok(None)
 }

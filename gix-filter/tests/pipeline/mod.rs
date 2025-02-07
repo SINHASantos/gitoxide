@@ -8,7 +8,12 @@ mod convert_to_worktree;
 #[test]
 fn default() -> crate::Result {
     let mut filters = gix_filter::Pipeline::default();
-    let out = filters.convert_to_worktree(b"hi", "file".into(), |_, _| {}, gix_filter::driver::apply::Delay::Allow)?;
+    let out = filters.convert_to_worktree(
+        b"hi",
+        "file".into(),
+        &mut |_, _| {},
+        gix_filter::driver::apply::Delay::Allow,
+    )?;
     assert_eq!(
         out.as_bytes().expect("unchanged").as_bstr(),
         "hi",
@@ -53,7 +58,7 @@ fn pipeline(
     let cache = attribute_cache(name)?;
     let (drivers, encodings_with_roundtrip_check, crlf_roundtrip_check, eol_config) = init();
     let pipe = gix_filter::Pipeline::new(
-        cache.attributes_collection(),
+        Default::default(),
         gix_filter::pipeline::Options {
             drivers,
             eol_config,

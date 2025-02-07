@@ -21,12 +21,12 @@ impl From<Error> for io::Error {
 }
 
 impl crate::WriteTo for Tag {
-    fn write_to(&self, mut out: impl io::Write) -> io::Result<()> {
-        encode::trusted_header_id(b"object", &self.target, &mut out)?;
-        encode::trusted_header_field(b"type", self.target_kind.as_bytes(), &mut out)?;
-        encode::header_field(b"tag", validated_name(self.name.as_ref())?, &mut out)?;
+    fn write_to(&self, out: &mut dyn io::Write) -> io::Result<()> {
+        encode::trusted_header_id(b"object", &self.target, out)?;
+        encode::trusted_header_field(b"type", self.target_kind.as_bytes(), out)?;
+        encode::header_field(b"tag", validated_name(self.name.as_ref())?, out)?;
         if let Some(tagger) = &self.tagger {
-            encode::trusted_header_signature(b"tagger", &tagger.to_ref(), &mut out)?;
+            encode::trusted_header_signature(b"tagger", &tagger.to_ref(), out)?;
         }
 
         out.write_all(NL)?;
@@ -44,8 +44,8 @@ impl crate::WriteTo for Tag {
         Kind::Tag
     }
 
-    fn size(&self) -> usize {
-        b"object".len() + 1 /* space */ + self.target.kind().len_in_hex() + 1 /* nl */
+    fn size(&self) -> u64 {
+        (b"object".len() + 1 /* space */ + self.target.kind().len_in_hex() + 1 /* nl */
             + b"type".len() + 1 /* space */ + self.target_kind.as_bytes().len() + 1 /* nl */
             + b"tag".len() + 1 /* space */ + self.name.len() + 1 /* nl */
             + self
@@ -53,12 +53,12 @@ impl crate::WriteTo for Tag {
             .as_ref()
             .map_or(0, |t| b"tagger".len() + 1 /* space */ + t.size() + 1 /* nl */)
             + 1 /* nl */ + self.message.len()
-            + self.pgp_signature.as_ref().map_or(0, |m| 1 /* nl */ + m.len())
+            + self.pgp_signature.as_ref().map_or(0, |m| 1 /* nl */ + m.len())) as u64
     }
 }
 
-impl<'a> crate::WriteTo for TagRef<'a> {
-    fn write_to(&self, mut out: impl io::Write) -> io::Result<()> {
+impl crate::WriteTo for TagRef<'_> {
+    fn write_to(&self, mut out: &mut dyn io::Write) -> io::Result<()> {
         encode::trusted_header_field(b"object", self.target, &mut out)?;
         encode::trusted_header_field(b"type", self.target_kind.as_bytes(), &mut out)?;
         encode::header_field(b"tag", validated_name(self.name)?, &mut out)?;
@@ -81,8 +81,8 @@ impl<'a> crate::WriteTo for TagRef<'a> {
         Kind::Tag
     }
 
-    fn size(&self) -> usize {
-        b"object".len() + 1 /* space */ + self.target().kind().len_in_hex() + 1 /* nl */
+    fn size(&self) -> u64 {
+        (b"object".len() + 1 /* space */ + self.target().kind().len_in_hex() + 1 /* nl */
             + b"type".len() + 1 /* space */ + self.target_kind.as_bytes().len() + 1 /* nl */
             + b"tag".len() + 1 /* space */ + self.name.len() + 1 /* nl */
             + self
@@ -90,7 +90,7 @@ impl<'a> crate::WriteTo for TagRef<'a> {
                 .as_ref()
                 .map_or(0, |t| b"tagger".len() + 1 /* space */ + t.size() + 1 /* nl */)
             + 1 /* nl */ + self.message.len()
-            + self.pgp_signature.as_ref().map_or(0, |m| 1 /* nl */ + m.len())
+            + self.pgp_signature.as_ref().map_or(0, |m| 1 /* nl */ + m.len())) as u64
     }
 }
 

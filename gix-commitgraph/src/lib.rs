@@ -9,10 +9,10 @@
 //! Eventually, git will merge these files together as the number of files grows.
 //! ## Feature Flags
 #![cfg_attr(
-    feature = "document-features",
-    cfg_attr(doc, doc = ::document_features::document_features!())
+    all(doc, feature = "document-features"),
+    doc = ::document_features::document_features!()
 )]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(all(doc, feature = "document-features"), feature(doc_cfg, doc_auto_cfg))]
 #![deny(missing_docs, rust_2018_idioms, unsafe_code)]
 
 use std::path::Path;
@@ -20,7 +20,7 @@ use std::path::Path;
 /// A single commit-graph file.
 ///
 /// All operations on a `File` are local to that graph file. Since a commit graph can span multiple
-/// files, all interesting graph operations belong on [`Graph`][crate::Graph].
+/// files, all interesting graph operations belong on [`Graph`].
 pub struct File {
     base_graph_count: u8,
     base_graphs_list_offset: Option<usize>,
@@ -45,7 +45,7 @@ pub struct Graph {
 
 /// Instantiate a commit graph from an `.git/objects/info` directory, or one of the various commit-graph files.
 pub fn at(path: impl AsRef<Path>) -> Result<Graph, init::Error> {
-    Graph::at(path)
+    Graph::at(path.as_ref())
 }
 
 mod access;

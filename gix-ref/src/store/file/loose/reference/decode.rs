@@ -1,5 +1,3 @@
-use std::convert::{TryFrom, TryInto};
-
 use gix_hash::ObjectId;
 use gix_object::bstr::BString;
 use winnow::{
@@ -37,7 +35,7 @@ impl TryFrom<MaybeUnsafeState> for Target {
 
     fn try_from(v: MaybeUnsafeState) -> Result<Self, Self::Error> {
         Ok(match v {
-            MaybeUnsafeState::Id(id) => Target::Peeled(id),
+            MaybeUnsafeState::Id(id) => Target::Object(id),
             MaybeUnsafeState::UnvalidatedPath(name) => {
                 Target::Symbolic(match gix_validate::reference::name(name.as_ref()) {
                     Ok(_) => FullName(name),
@@ -68,7 +66,7 @@ impl Reference {
     }
 }
 
-fn parse(i: &mut &[u8]) -> PResult<MaybeUnsafeState> {
+fn parse(i: &mut &[u8]) -> ModalResult<MaybeUnsafeState> {
     if let Some(_ref_prefix) = opt(terminated("ref: ", take_while(0.., b' '))).parse_next(i)? {
         terminated(take_while(0.., |b| b != b'\r' && b != b'\n'), opt(newline))
             .map(|path| MaybeUnsafeState::UnvalidatedPath(path.into()))

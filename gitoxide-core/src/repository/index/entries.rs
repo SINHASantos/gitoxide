@@ -23,14 +23,15 @@ pub(crate) mod function {
         io::{BufWriter, Write},
     };
 
+    use gix::index::entry::Stage;
     use gix::{
         bstr::{BStr, BString},
-        odb::FindExt,
-        repository::IndexPersistedOrInMemory,
+        worktree::IndexPersistedOrInMemory,
         Repository,
     };
 
     use crate::{
+        is_dir_to_mode,
         repository::index::entries::{Attributes, Options},
         OutputFormat,
     };
@@ -133,27 +134,25 @@ pub(crate) mod function {
                     .and_then(|(attrs, cache)| {
                         // If the user wants to see assigned attributes, we always have to match.
                         attributes.is_some().then(|| {
-                            cache
-                                .at_entry(entry.path(&index), None, |id, buf| repo.objects.find_blob(id, buf))
-                                .map(|entry| {
-                                    let is_excluded = entry.is_excluded();
-                                    stats.excluded += usize::from(is_excluded);
-                                    let attributes: Vec<_> = {
-                                        last_match = Some(entry.matching_attributes(attrs));
-                                        attrs.iter().map(|m| m.assignment.to_owned()).collect()
-                                    };
-                                    stats.with_attributes += usize::from(!attributes.is_empty());
-                                    stats.max_attributes_per_path = stats.max_attributes_per_path.max(attributes.len());
-                                    if let Some(attrs) = repo_attrs.as_mut() {
-                                        attributes.iter().for_each(|attr| {
-                                            attrs.insert(attr.clone());
-                                        });
-                                    }
-                                    Attrs {
-                                        is_excluded,
-                                        attributes,
-                                    }
-                                })
+                            cache.at_entry(entry.path(&index), None).map(|entry| {
+                                let is_excluded = entry.is_excluded();
+                                stats.excluded += usize::from(is_excluded);
+                                let attributes: Vec<_> = {
+                                    last_match = Some(entry.matching_attributes(attrs));
+                                    attrs.iter().map(|m| m.assignment.to_owned()).collect()
+                                };
+                                stats.with_attributes += usize::from(!attributes.is_empty());
+                                stats.max_attributes_per_path = stats.max_attributes_per_path.max(attributes.len());
+                                if let Some(attrs) = repo_attrs.as_mut() {
+                                    attributes.iter().for_each(|attr| {
+                                        attrs.insert(attr.clone());
+                                    });
+                                }
+                                Attrs {
+                                    is_excluded,
+                                    attributes,
+                                }
+                            })
                         })
                     })
                     .transpose()?;
@@ -161,26 +160,30 @@ pub(crate) mod function {
                 // Note that we intentionally ignore `_case` so that we act like git does, attribute matching case is determined
                 // by the repository, not the pathspec.
                 let entry_is_excluded = pathspec
-                    .pattern_matching_relative_path(entry.path(&index), Some(false), |rela_path, _case, is_dir, out| {
-                        cache
-                            .as_mut()
-                            .map(|(attrs, cache)| {
-                                match last_match {
-                                    // The user wants the attributes for display, so the match happened already.
-                                    Some(matched) => {
-                                        attrs.copy_into(cache.attributes_collection(), out);
-                                        matched
+                    .pattern_matching_relative_path(
+                        entry.path(&index),
+                        Some(false),
+                        &mut |rela_path, _case, is_dir, out| {
+                            cache
+                                .as_mut()
+                                .map(|(attrs, cache)| {
+                                    match last_match {
+                                        // The user wants the attributes for display, so the match happened already.
+                                        Some(matched) => {
+                                            attrs.copy_into(cache.attributes_collection(), out);
+                                            matched
+                                        }
+                                        // The user doesn't want attributes, so we set the cache position on demand only
+                                        None => cache
+                                            .at_entry(rela_path, Some(is_dir_to_mode(is_dir)))
+                                            .ok()
+                                            .map(|platform| platform.matching_attributes(out))
+                                            .unwrap_or_default(),
                                     }
-                                    // The user doesn't want attributes, so we set the cache position on demand only
-                                    None => cache
-                                        .at_entry(rela_path, Some(is_dir), |id, buf| repo.objects.find_blob(id, buf))
-                                        .ok()
-                                        .map(|platform| platform.matching_attributes(out))
-                                        .unwrap_or_default(),
-                                }
-                            })
-                            .unwrap_or_default()
-                    })
+                                })
+                                .unwrap_or_default()
+                        },
+                    )
                     .map_or(true, |m| m.is_excluded());
 
                 let entry_is_submodule = entry.mode.is_submodule();
@@ -195,7 +198,7 @@ pub(crate) mod function {
                         sms_by_path
                             .iter()
                             .find_map(|(path, sm)| (path == entry_path).then_some(sm))
-                            .filter(|sm| sm.git_dir_try_old_form().map_or(false, |dot_git| dot_git.exists()))
+                            .filter(|sm| sm.git_dir_try_old_form().is_ok_and(|dot_git| dot_git.exists()))
                     })
                 {
                     let sm_path = gix::path::to_unix_separators_on_windows(sm.path()?);
@@ -224,7 +227,7 @@ pub(crate) mod function {
                                 to_human_simple(out, &index, entry, attrs, prefix)
                             } else {
                                 to_human(out, &index, entry, attrs, prefix)
-                            }?
+                            }?;
                         }
                         #[cfg(feature = "serde")]
                         OutputFormat::Json => to_json(out, &index, entry, attrs, entries.peek().is_none(), prefix)?,
@@ -251,10 +254,11 @@ pub(crate) mod function {
     ) -> anyhow::Result<(
         gix::pathspec::Search,
         IndexPersistedOrInMemory,
-        Option<(gix::attrs::search::Outcome, gix::worktree::Stack)>,
+        Option<(gix::attrs::search::Outcome, gix::AttributeStack<'_>)>,
     )> {
         let index = repo.index_or_load_from_head()?;
         let pathspec = repo.pathspec(
+            true,
             pathspecs,
             false,
             &index,
@@ -315,7 +319,7 @@ pub(crate) mod function {
 
     #[cfg(feature = "serde")]
     fn to_json(
-        mut out: &mut impl std::io::Write,
+        out: &mut impl std::io::Write,
         index: &gix::index::File,
         entry: &gix::index::Entry,
         attrs: Option<Attrs>,
@@ -334,7 +338,7 @@ pub(crate) mod function {
         }
 
         serde_json::to_writer(
-            &mut out,
+            &mut *out,
             &Entry {
                 stat: &entry.stat,
                 hex_id: entry.id.to_hex().to_string(),
@@ -390,10 +394,10 @@ pub(crate) mod function {
             out,
             "{} {}{:?} {} {}{}{}",
             match entry.flags.stage() {
-                0 => "BASE   ",
-                1 => "OURS   ",
-                2 => "THEIRS ",
-                _ => "UNKNOWN",
+                Stage::Unconflicted => "       ",
+                Stage::Base => "BASE   ",
+                Stage::Ours => "OURS   ",
+                Stage::Theirs => "THEIRS ",
             },
             if entry.flags.is_empty() {
                 "".to_string()
@@ -417,7 +421,7 @@ pub(crate) mod function {
                 buf.push_str(" ➡ ");
             }
             if a.is_excluded {
-                buf.push_str(" ❌");
+                buf.push_str(" 🗑️");
             }
             if !a.attributes.is_empty() {
                 buf.push_str(" (");

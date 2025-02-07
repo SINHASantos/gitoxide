@@ -1,13 +1,8 @@
 #![deny(unsafe_code, rust_2018_idioms)]
 
-mod plumbing;
-mod shared;
-
-use anyhow::Result;
-
 #[cfg(feature = "pretty-cli")]
-fn main() -> Result<()> {
-    plumbing::main()
+fn main() -> anyhow::Result<()> {
+    gitoxide::plumbing::main()
 }
 
 #[cfg(not(feature = "pretty-cli"))]

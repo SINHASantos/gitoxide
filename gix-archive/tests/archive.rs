@@ -8,86 +8,80 @@ mod from_tree {
 
     use gix_archive::Format;
     use gix_attributes::glob::pattern::Case;
-    use gix_object::tree::EntryMode;
-    use gix_odb::FindExt;
+    use gix_object::tree::EntryKind;
     use gix_testtools::bstr::ByteSlice;
     use gix_worktree::stack::state::attributes::Source;
 
     use crate::hex_to_id;
 
+    #[cfg(target_pointer_width = "64")]
+    const EXPECTED_BUFFER_LENGTH: usize = 551;
+    #[cfg(target_pointer_width = "32")]
+    const EXPECTED_BUFFER_LENGTH: usize = 479;
+
     #[test]
     fn basic_usage_internal() -> gix_testtools::Result {
         basic_usage(gix_archive::Format::InternalTransientNonPersistable, |buf| {
-            assert_eq!(buf.len(), if cfg!(windows) { 565 } else { 551 });
+            assert_eq!(buf.len(), EXPECTED_BUFFER_LENGTH);
 
             let mut stream = gix_worktree_stream::Stream::from_read(std::io::Cursor::new(buf));
             let mut paths_and_modes = Vec::new();
             while let Some(mut entry) = stream.next_entry().expect("entry retrieval does not fail") {
-                paths_and_modes.push((entry.relative_path().to_owned(), entry.mode, entry.id));
+                paths_and_modes.push((entry.relative_path().to_owned(), entry.mode.kind(), entry.id));
                 let mut buf = Vec::new();
                 entry.read_to_end(&mut buf).expect("stream can always be read");
             }
 
-            let expected_link_mode = if cfg!(windows) {
-                EntryMode::Blob
-            } else {
-                EntryMode::Link
-            };
-            let expected_exe_mode = if cfg!(windows) {
-                EntryMode::Blob
-            } else {
-                EntryMode::BlobExecutable
-            };
             assert_eq!(
                 paths_and_modes,
                 &[
                     (
                         ".gitattributes".into(),
-                        EntryMode::Blob,
+                        EntryKind::Blob,
                         hex_to_id("45c160c35c17ad264b96431cceb9793160396e99")
                     ),
                     (
                         "a".into(),
-                        EntryMode::Blob,
+                        EntryKind::Blob,
                         hex_to_id("45b983be36b73c0788dc9cbcb76cbb80fc7bb057")
                     ),
                     (
                         "symlink-to-a".into(),
-                        expected_link_mode,
-                        hex_to_id(if cfg!(windows) {
-                            "45b983be36b73c0788dc9cbcb76cbb80fc7bb057"
-                        } else {
-                            "2e65efe2a145dda7ee51d1741299f848e5bf752e"
-                        })
+                        EntryKind::Link,
+                        hex_to_id("2e65efe2a145dda7ee51d1741299f848e5bf752e")
                     ),
                     (
                         "dir/b".into(),
-                        EntryMode::Blob,
+                        EntryKind::Blob,
                         hex_to_id("ab4a98190cf776b43cb0fe57cef231fb93fd07e6")
                     ),
                     (
                         "dir/subdir/exe".into(),
-                        expected_exe_mode,
+                        EntryKind::BlobExecutable,
                         hex_to_id("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391")
                     ),
                     (
                         "extra-file".into(),
-                        EntryMode::Blob,
+                        EntryKind::Blob,
                         hex_to_id("0000000000000000000000000000000000000000")
                     ),
                     (
                         "extra-exe".into(),
-                        expected_exe_mode,
+                        if cfg!(windows) {
+                            EntryKind::Blob
+                        } else {
+                            EntryKind::BlobExecutable
+                        },
                         hex_to_id("0000000000000000000000000000000000000000")
                     ),
                     (
                         "extra-dir-empty".into(),
-                        EntryMode::Tree,
+                        EntryKind::Tree,
                         hex_to_id("0000000000000000000000000000000000000000")
                     ),
                     (
                         "extra-dir/symlink-to-extra".into(),
-                        expected_link_mode,
+                        EntryKind::Link,
                         hex_to_id("0000000000000000000000000000000000000000")
                     )
                 ]
@@ -120,34 +114,23 @@ mod from_tree {
                     header.mode()?,
                 ));
             }
-            let expected_symlink_type = if cfg!(windows) {
-                EntryType::Regular
-            } else {
-                EntryType::Symlink
-            };
-            let expected_exe_mode = if cfg!(windows) { 420 } else { 493 };
             assert_eq!(
                 out,
                 [
                     ("prefix/.gitattributes", EntryType::Regular, 56, 420),
                     ("prefix/a", EntryType::Regular, 3, 420),
-                    (
-                        "prefix/symlink-to-a",
-                        expected_symlink_type,
-                        if cfg!(windows) { 3 } else { 0 },
-                        420
-                    ),
+                    ("prefix/symlink-to-a", EntryType::Symlink, 0, 420),
                     ("prefix/dir/b", EntryType::Regular, 3, 420),
-                    ("prefix/dir/subdir/exe", EntryType::Regular, 0, expected_exe_mode),
+                    ("prefix/dir/subdir/exe", EntryType::Regular, 0, 493),
                     ("prefix/extra-file", EntryType::Regular, 21, 420),
-                    ("prefix/extra-exe", EntryType::Regular, 0, expected_exe_mode),
-                    ("prefix/extra-dir-empty", EntryType::Directory, 0, 420),
                     (
-                        "prefix/extra-dir/symlink-to-extra",
-                        expected_symlink_type,
-                        if cfg!(windows) { 21 } else { 0 },
-                        420
-                    )
+                        "prefix/extra-exe",
+                        EntryType::Regular,
+                        0,
+                        if cfg!(windows) { 420 } else { 493 }
+                    ),
+                    ("prefix/extra-dir-empty", EntryType::Directory, 0, 420),
+                    ("prefix/extra-dir/symlink-to-extra", EntryType::Symlink, 0, 420)
                 ]
                 .into_iter()
                 .map(|(path, b, c, d)| (bstr::BStr::new(path).to_owned(), b, c, d))
@@ -184,8 +167,8 @@ mod from_tree {
             },
             |buf| {
                 assert!(
-                    buf.len() < 1220,
-                    "bigger than uncompressed for some reason: {} < 1220",
+                    buf.len() < 1280,
+                    "much bigger than uncompressed for some reason (565): {} < 1270",
                     buf.len()
                 );
                 let mut ar = zip::ZipArchive::new(std::io::Cursor::new(buf.as_slice()))?;
@@ -209,15 +192,11 @@ mod from_tree {
                 );
                 let mut link = ar.by_name("prefix/symlink-to-a")?;
                 assert!(!link.is_dir());
-                assert!(link.is_file(), "no symlink differentiation");
-                assert_eq!(
-                    link.unix_mode(),
-                    Some(if cfg!(windows) { 0o100644 } else { 0o120644 }),
-                    "the mode specifies what it should be"
-                );
+                assert!(link.is_symlink(), "symlinks are supported as well, but only on Unix");
+                assert_eq!(link.unix_mode(), Some(0o120644), "the mode specifies what it should be");
                 let mut buf = Vec::new();
                 link.read_to_end(&mut buf)?;
-                assert_eq!(buf.as_bstr(), if cfg!(windows) { "hi\n" } else { "a" });
+                assert_eq!(buf.as_bstr(), "a");
                 Ok(())
             },
         )
@@ -230,14 +209,11 @@ mod from_tree {
         let (dir, head_tree, odb, mut cache) = basic()?;
         let mut stream = gix_worktree_stream::from_tree(
             head_tree,
-            {
-                let odb = odb.clone();
-                move |id, buf| odb.find(id, buf)
-            },
+            odb.clone(),
             noop_pipeline(),
             move |rela_path, mode, attrs| {
                 cache
-                    .at_entry(rela_path, mode.is_tree().into(), |id, buf| odb.find_blob(id, buf))
+                    .at_entry(rela_path, Some(mode.into()), &odb)
                     .map(|entry| entry.matching_attributes(attrs))
                     .map(|_| ())
             },
@@ -307,6 +283,6 @@ mod from_tree {
     }
 
     fn noop_pipeline() -> gix_filter::Pipeline {
-        gix_filter::Pipeline::new(&Default::default(), Default::default())
+        gix_filter::Pipeline::new(Default::default(), Default::default())
     }
 }

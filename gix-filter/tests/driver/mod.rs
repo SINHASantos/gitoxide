@@ -1,36 +1,17 @@
-use std::path::PathBuf;
-
-use once_cell::sync::Lazy;
-
-static DRIVER: Lazy<PathBuf> = Lazy::new(|| {
-    let mut cargo = std::process::Command::new(env!("CARGO"));
-    let res = cargo
-        .args(["build", "--example", "arrow"])
-        .status()
-        .expect("cargo should run fine");
-    assert!(res.success(), "cargo invocation should be successful");
-
-    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .ancestors()
-        .nth(1)
-        .expect("first parent in target dir")
-        .join("debug")
-        .join("examples")
-        .join(if cfg!(windows) { "arrow.exe" } else { "arrow" });
-    assert!(path.is_file(), "Expecting driver to be located at {path:?}");
-    path
-});
+static DRIVER: &str = concat!(env!("CARGO"), " run --example arrow");
 
 mod baseline {
     use crate::driver::DRIVER;
+    use serial_test::serial;
 
+    #[serial]
     #[test]
     fn our_implementation_used_by_git() -> crate::Result {
-        let mut exe = DRIVER.to_string_lossy().into_owned();
+        let mut exe = DRIVER.to_owned();
         if cfg!(windows) {
             exe = exe.replace('\\', "/");
         }
-        gix_testtools::scripted_fixture_read_only_with_args("baseline.sh", [exe])?;
+        gix_testtools::scripted_fixture_read_only_with_args_single_archive("baseline.sh", [exe])?;
         Ok(())
     }
 }
@@ -60,7 +41,9 @@ mod shutdown {
         let client = extract_client(state.maybe_launch_process(&driver, Operation::Clean, "does not matter".into())?);
 
         assert!(
-            client.invoke("wait-1-s", None, &b""[..])?.is_success(),
+            client
+                .invoke("wait-1-s", &mut None.into_iter(), &mut &b""[..])?
+                .is_success(),
             "this lets the process wait for a second using our hidden command"
         );
 
@@ -83,6 +66,7 @@ pub(crate) mod apply {
         driver::{apply, apply::Delay, Operation},
         Driver,
     };
+    use serial_test::serial;
 
     use crate::driver::{shutdown::extract_client, DRIVER};
 
@@ -93,7 +77,7 @@ pub(crate) mod apply {
     }
 
     pub(crate) fn driver_with_process() -> Driver {
-        let mut exe = DRIVER.to_string_lossy().into_owned();
+        let mut exe = DRIVER.to_owned();
         if cfg!(windows) {
             exe = exe.replace('\\', "/");
         }
@@ -106,6 +90,7 @@ pub(crate) mod apply {
         }
     }
 
+    #[serial]
     #[test]
     fn missing_driver_means_no_filter_is_applied() -> crate::Result {
         let mut state = gix_filter::driver::State::default();
@@ -132,21 +117,23 @@ pub(crate) mod apply {
         Ok(())
     }
 
+    #[serial]
     #[test]
     fn a_crashing_process_can_restart_it() -> crate::Result {
         let mut state = gix_filter::driver::State::default();
         let driver = driver_with_process();
+        let err = match state.apply(
+            &driver,
+            &mut std::io::empty(),
+            Operation::Smudge,
+            context_from_path("fail"),
+        ) {
+            Ok(_) => panic!("expecting an error as invalid context was passed"),
+            Err(err) => err,
+        };
         assert!(
-            matches!(
-                state.apply(
-                    &driver,
-                    &mut std::io::empty(),
-                    Operation::Smudge,
-                    context_from_path("fail")
-                ),
-                Err(gix_filter::driver::apply::Error::ProcessInvoke { .. })
-            ),
-            "cannot invoke if failure is requested"
+            matches!(err, gix_filter::driver::apply::Error::ProcessInvoke { .. }),
+            "{err:?}: cannot invoke if failure is requested"
         );
 
         let mut filtered = state
@@ -164,13 +151,16 @@ pub(crate) mod apply {
         Ok(())
     }
 
+    #[serial]
     #[test]
     fn process_status_abort_disables_capability() -> crate::Result {
         let mut state = gix_filter::driver::State::default();
         let driver = driver_with_process();
         let client = extract_client(state.maybe_launch_process(&driver, Operation::Clean, "does not matter".into())?);
 
-        assert!(client.invoke("next-smudge-aborts", None, &b""[..])?.is_success());
+        assert!(client
+            .invoke("next-smudge-aborts", &mut None.into_iter(), &mut &b""[..])?
+            .is_success());
         assert!(
             matches!(state.apply(&driver, &mut std::io::empty(), Operation::Smudge, context_from_path("any")), Err(driver::apply::Error::ProcessStatus {status: driver::process::Status::Named(name), ..}) if name == "abort")
         );
@@ -188,6 +178,7 @@ pub(crate) mod apply {
         Ok(())
     }
 
+    #[serial]
     #[test]
     fn process_status_strange_shuts_down_process() -> crate::Result {
         let mut state = gix_filter::driver::State::default();
@@ -197,8 +188,8 @@ pub(crate) mod apply {
         assert!(client
             .invoke(
                 "next-invocation-returns-strange-status-and-smudge-fails-permanently",
-                None,
-                &b""[..]
+                &mut None.into_iter(),
+                &mut &b""[..]
             )?
             .is_success());
         assert!(
@@ -213,6 +204,7 @@ pub(crate) mod apply {
         Ok(())
     }
 
+    #[serial]
     #[test]
     fn smudge_and_clean_failure_is_translated_to_observable_error_for_required_drivers() -> crate::Result {
         let mut state = gix_filter::driver::State::default();
@@ -234,6 +226,7 @@ pub(crate) mod apply {
         Ok(())
     }
 
+    #[serial]
     #[test]
     fn smudge_and_clean_failure_means_nothing_if_required_is_false() -> crate::Result {
         let mut state = gix_filter::driver::State::default();
@@ -257,6 +250,7 @@ pub(crate) mod apply {
         Ok(())
     }
 
+    #[serial]
     #[test]
     fn smudge_and_clean_series() -> crate::Result {
         let mut state = gix_filter::driver::State::default();

@@ -66,7 +66,7 @@ fn compare_baseline_with_ours() {
                 is_match, *expected_matches,
                 "baseline for matches must be {expected_matches} - check baseline and git version: {m:?}"
             );
-            match std::panic::catch_unwind(|| {
+            let actual = std::panic::catch_unwind(|| {
                 let pattern = pat(pattern);
                 pattern.matches_repo_relative_path(
                     value,
@@ -75,7 +75,8 @@ fn compare_baseline_with_ours() {
                     *case,
                     gix_glob::wildmatch::Mode::NO_MATCH_SLASH_LITERAL,
                 )
-            }) {
+            });
+            match actual {
                 Ok(actual_match) => {
                     if actual_match == is_match {
                         total_correct += 1;
@@ -112,7 +113,7 @@ fn non_dirs_for_must_be_dir_patterns_are_ignored() {
     let path = "hello";
     assert!(
         !pattern.matches_repo_relative_path(
-            path,
+            path.into(),
             None,
             false.into(), /* is-dir */
             Case::Sensitive,
@@ -122,7 +123,7 @@ fn non_dirs_for_must_be_dir_patterns_are_ignored() {
     );
     assert!(
         pattern.matches_repo_relative_path(
-            path,
+            path.into(),
             None,
             true.into(), /* is-dir */
             Case::Sensitive,
@@ -323,6 +324,23 @@ fn single_paths_match_anywhere() {
         !match_path(pattern, "dir/target/", Some(true), Case::Sensitive),
         "we need sanitized paths that don't have trailing slashes"
     );
+}
+
+#[test]
+fn fuzzed_exponential_runaway_denial_of_service() {
+    // original: "?[at(/\u{1d}\0\u{4}\u{14}\0[[[[:[\0\0\0\0\0\0\0\0Wt(/\u{1d}\0\u{4}\u{14}\0[[[[:[\0\0\0\0\0\0\0\0\0\0\0]"
+    //  reduced: "[[:[:]"
+    for pattern in [
+        include_bytes!("../fixtures/fuzzed/many-stars.pattern"),
+        "*?[wxxxxxx\0!t[:rt]\u{14}*".as_bytes(),
+        "?[at(/\u{1d}\0\u{4}\u{14}\0[[[[:[\0\0\0\0\0\0\0\0\0\0/s\0\0\0*\0\0\0\0\0\0\0\0]\0\0\0\0\0\0\0\0\0".as_bytes(),
+        b"[[:digit]ab]",
+        b"[[:]ab]",
+        b"[[:[:x]",
+    ] {
+        let pat = pat(pattern);
+        match_file(&pat, "relative/path", Case::Sensitive);
+    }
 }
 
 fn pat<'a>(pattern: impl Into<&'a BStr>) -> gix_glob::Pattern {

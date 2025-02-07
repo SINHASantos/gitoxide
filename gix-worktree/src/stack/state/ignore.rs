@@ -2,6 +2,7 @@ use std::path::Path;
 
 use bstr::{BStr, ByteSlice};
 use gix_glob::pattern::Case;
+use gix_object::FindExt;
 
 use crate::{
     stack::state::{Ignore, IgnoreMatchGroup},
@@ -104,6 +105,7 @@ impl Ignore {
             let match_ = gix_ignore::search::Match {
                 pattern: &mapping.pattern,
                 sequence_number: mapping.sequence_number,
+                kind: mapping.value,
                 source,
             };
             if mapping.pattern.is_negative() {
@@ -156,21 +158,17 @@ impl Ignore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn push_directory<Find, E>(
+    pub(crate) fn push_directory(
         &mut self,
         root: &Path,
         dir: &Path,
         rela_dir: &BStr,
         buf: &mut Vec<u8>,
         id_mappings: &[PathIdMapping],
-        mut find: Find,
+        objects: &dyn gix_object::Find,
         case: Case,
         stats: &mut Statistics,
-    ) -> std::io::Result<()>
-    where
-        Find: for<'b> FnMut(&gix_hash::oid, &'b mut Vec<u8>) -> Result<gix_object::BlobRef<'b>, E>,
-        E: std::error::Error + Send + Sync + 'static,
-    {
+    ) -> std::io::Result<()> {
         self.matched_directory_patterns_stack
             .push(self.matching_exclude_pattern_no_dir(rela_dir, Some(true), case));
 
@@ -180,7 +178,8 @@ impl Ignore {
             Source::IdMapping => {
                 match ignore_file_in_index {
                     Ok(idx) => {
-                        let ignore_blob = find(&id_mappings[idx].1, buf)
+                        let ignore_blob = objects
+                            .find_blob(&id_mappings[idx].1, buf)
                             .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
                         let ignore_path = gix_path::from_bstring(ignore_path_relative.into_owned());
                         self.stack
@@ -189,7 +188,7 @@ impl Ignore {
                     }
                     Err(_) => {
                         // Need one stack level per component so push and pop matches.
-                        self.stack.patterns.push(Default::default())
+                        self.stack.patterns.push(Default::default());
                     }
                 }
             }
@@ -207,7 +206,8 @@ impl Ignore {
                 if !added {
                     match ignore_file_in_index {
                         Ok(idx) => {
-                            let ignore_blob = find(&id_mappings[idx].1, buf)
+                            let ignore_blob = objects
+                                .find_blob(&id_mappings[idx].1, buf)
                                 .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
                             let ignore_path = gix_path::from_bstring(ignore_path_relative.into_owned());
                             self.stack
@@ -216,7 +216,7 @@ impl Ignore {
                         }
                         Err(_) => {
                             // Need one stack level per component so push and pop matches.
-                            self.stack.patterns.push(Default::default())
+                            self.stack.patterns.push(Default::default());
                         }
                     }
                 }

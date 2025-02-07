@@ -1,3 +1,4 @@
+#![allow(clippy::unnecessary_literal_bound)]
 #![allow(missing_docs)]
 
 /// The `author` top-level section.
@@ -37,7 +38,9 @@ pub mod credential;
 
 /// The `diff` top-level section.
 #[derive(Copy, Clone, Default)]
+#[cfg(feature = "blob-diff")]
 pub struct Diff;
+#[cfg(feature = "blob-diff")]
 pub mod diff;
 
 /// The `extension` top-level section.
@@ -70,6 +73,14 @@ pub mod index;
 pub struct Init;
 mod init;
 
+#[derive(Copy, Clone, Default)]
+pub struct Mailmap;
+mod mailmap;
+
+#[derive(Copy, Clone, Default)]
+pub struct Merge;
+mod merge;
+
 /// The `pack` top-level section.
 #[derive(Copy, Clone, Default)]
 pub struct Pack;
@@ -79,6 +90,11 @@ pub mod pack;
 #[derive(Copy, Clone, Default)]
 pub struct Protocol;
 pub mod protocol;
+
+/// The `push` top-level section.
+#[derive(Copy, Clone, Default)]
+pub struct Push;
+pub mod push;
 
 /// The `remote` top-level section.
 #[derive(Copy, Clone, Default)]
@@ -94,6 +110,13 @@ mod safe;
 #[derive(Copy, Clone, Default)]
 pub struct Ssh;
 pub mod ssh;
+
+/// The `status` top-level section.
+#[derive(Copy, Clone, Default)]
+#[cfg(feature = "status")]
+pub struct Status;
+#[cfg(feature = "status")]
+pub mod status;
 
 /// The `user` top-level section.
 #[derive(Copy, Clone, Default)]

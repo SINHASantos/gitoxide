@@ -10,3 +10,6 @@ pub mod tag;
 
 ///
 pub mod submodule;
+
+///
+pub mod path;

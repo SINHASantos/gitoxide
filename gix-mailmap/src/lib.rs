@@ -2,10 +2,10 @@
 //! using an [accelerated data-structure][Snapshot].
 //! ## Feature Flags
 #![cfg_attr(
-    feature = "document-features",
-    cfg_attr(doc, doc = ::document_features::document_features!())
+    all(doc, feature = "document-features"),
+    doc = ::document_features::document_features!()
 )]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(all(doc, feature = "document-features"), feature(doc_cfg, doc_auto_cfg))]
 #![deny(missing_docs, rust_2018_idioms)]
 #![forbid(unsafe_code)]
 
@@ -36,7 +36,7 @@ pub mod snapshot;
 /// optionally name to find mappings to new names and/or emails.
 ///
 /// The memory layout is efficient, even though lots of small allocations are performed to store strings of emails and names.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug, Eq, PartialEq)]
 pub struct Snapshot {
     /// Sorted by `old_email`
     entries_by_old_email: Vec<snapshot::EmailEntry>,

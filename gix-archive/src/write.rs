@@ -64,7 +64,7 @@ where
                                         out,
                                         match compression_level {
                                             None => flate2::Compression::default(),
-                                            Some(level) => flate2::Compression::new(level as u32),
+                                            Some(level) => flate2::Compression::new(u32::from(level)),
                                         },
                                     );
                                     let mut ar = tar::Builder::new(gz);
@@ -126,7 +126,7 @@ where
     NextFn: FnMut(&mut Stream) -> Result<Option<Entry<'_>>, gix_worktree_stream::entry::Error>,
 {
     let compression_level = match opts.format {
-        Format::Zip { compression_level } => compression_level.map(|lvl| lvl as i32),
+        Format::Zip { compression_level } => compression_level.map(i64::from),
         _other => return write_stream(stream, next_entry, out, opts),
     };
 
@@ -134,10 +134,22 @@ where
     {
         let mut ar = zip::write::ZipWriter::new(out);
         let mut buf = Vec::new();
-        let mtime = time::OffsetDateTime::from_unix_timestamp(opts.modification_time)
+        let zdt = jiff::Timestamp::from_second(opts.modification_time)
             .map_err(|err| Error::InvalidModificationTime(Box::new(err)))?
-            .try_into()
-            .map_err(|err| Error::InvalidModificationTime(Box::new(err)))?;
+            .to_zoned(jiff::tz::TimeZone::UTC);
+        let mtime = zip::DateTime::from_date_and_time(
+            zdt.year()
+                .try_into()
+                .map_err(|err| Error::InvalidModificationTime(Box::new(err)))?,
+            // These are all OK because month, day, hour, minute and second
+            // are always positive.
+            zdt.month().try_into().expect("non-negative"),
+            zdt.day().try_into().expect("non-negative"),
+            zdt.hour().try_into().expect("non-negative"),
+            zdt.minute().try_into().expect("non-negative"),
+            zdt.second().try_into().expect("non-negative"),
+        )
+        .map_err(|err| Error::InvalidModificationTime(Box::new(err)))?;
         while let Some(entry) = next_entry(stream)? {
             append_zip_entry(
                 &mut ar,
@@ -161,31 +173,27 @@ fn append_zip_entry<W: std::io::Write + std::io::Seek>(
     mut entry: gix_worktree_stream::Entry<'_>,
     buf: &mut Vec<u8>,
     mtime: zip::DateTime,
-    compression_level: Option<i32>,
+    compression_level: Option<i64>,
     tree_prefix: Option<&bstr::BString>,
 ) -> Result<(), Error> {
-    let file_opts = zip::write::FileOptions::default()
+    let file_opts = zip::write::FileOptions::<'_, ()>::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .compression_level(compression_level)
         .large_file(entry.bytes_remaining().map_or(true, |len| len > u32::MAX as usize))
         .last_modified_time(mtime)
-        .unix_permissions(if matches!(entry.mode, gix_object::tree::EntryMode::BlobExecutable) {
-            0o755
-        } else {
-            0o644
-        });
+        .unix_permissions(if entry.mode.is_executable() { 0o755 } else { 0o644 });
     let path = add_prefix(entry.relative_path(), tree_prefix).into_owned();
-    match entry.mode {
-        gix_object::tree::EntryMode::Blob | gix_object::tree::EntryMode::BlobExecutable => {
+    match entry.mode.kind() {
+        gix_object::tree::EntryKind::Blob | gix_object::tree::EntryKind::BlobExecutable => {
             ar.start_file(path.to_string(), file_opts)
                 .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
             std::io::copy(&mut entry, ar)?;
         }
-        gix_object::tree::EntryMode::Tree | gix_object::tree::EntryMode::Commit => {
+        gix_object::tree::EntryKind::Tree | gix_object::tree::EntryKind::Commit => {
             ar.add_directory(path.to_string(), file_opts)
                 .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
         }
-        gix_object::tree::EntryMode::Link => {
+        gix_object::tree::EntryKind::Link => {
             use bstr::ByteSlice;
             std::io::copy(&mut entry, buf)?;
             ar.add_symlink(path.to_string(), buf.as_bstr().to_string(), file_opts)
@@ -206,18 +214,14 @@ fn append_tar_entry<W: std::io::Write>(
     let mut header = tar::Header::new_gnu();
     header.set_mtime(mtime_seconds_since_epoch as u64);
     header.set_entry_type(tar_entry_type(entry.mode));
-    header.set_mode(if matches!(entry.mode, gix_object::tree::EntryMode::BlobExecutable) {
-        0o755
-    } else {
-        0o644
-    });
+    header.set_mode(if entry.mode.is_executable() { 0o755 } else { 0o644 });
     buf.clear();
     std::io::copy(&mut entry, buf)?;
 
     let path = gix_path::from_bstr(add_prefix(entry.relative_path(), opts.tree_prefix.as_ref()));
     header.set_size(buf.len() as u64);
 
-    if entry.mode == gix_object::tree::EntryMode::Link {
+    if entry.mode.is_link() {
         use bstr::ByteSlice;
         let target = gix_path::from_bstr(buf.as_bstr());
         header.set_entry_type(tar::EntryType::Symlink);
@@ -231,13 +235,13 @@ fn append_tar_entry<W: std::io::Write>(
 
 #[cfg(any(feature = "tar", feature = "tar_gz"))]
 fn tar_entry_type(mode: gix_object::tree::EntryMode) -> tar::EntryType {
-    use gix_object::tree::EntryMode;
+    use gix_object::tree::EntryKind;
     use tar::EntryType;
-    match mode {
-        EntryMode::Tree | EntryMode::Commit => EntryType::Directory,
-        EntryMode::Blob => EntryType::Regular,
-        EntryMode::BlobExecutable => EntryType::Regular,
-        EntryMode::Link => EntryType::Link,
+    match mode.kind() {
+        EntryKind::Tree | EntryKind::Commit => EntryType::Directory,
+        EntryKind::Blob => EntryType::Regular,
+        EntryKind::BlobExecutable => EntryType::Regular,
+        EntryKind::Link => EntryType::Link,
     }
 }
 

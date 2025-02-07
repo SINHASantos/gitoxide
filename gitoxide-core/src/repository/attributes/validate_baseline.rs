@@ -18,7 +18,7 @@ pub(crate) mod function {
     };
 
     use anyhow::{anyhow, bail};
-    use gix::{attrs::Assignment, bstr::BString, odb::FindExt, Progress};
+    use gix::{attrs::Assignment, bstr::BString, Count, Progress};
 
     use crate::{
         repository::attributes::{query::attributes_cache, validate_baseline::Options},
@@ -28,7 +28,7 @@ pub(crate) mod function {
     pub fn validate_baseline(
         repo: gix::Repository,
         paths: Option<impl Iterator<Item = BString> + Send + 'static>,
-        mut progress: impl Progress + 'static,
+        mut progress: impl gix::NestedProgress + 'static,
         mut out: impl io::Write,
         mut err: impl io::Write,
         Options {
@@ -74,13 +74,14 @@ pub(crate) mod function {
                 let tx_base = tx_base.clone();
                 let mut progress = progress.add_child("attributes");
                 move || -> anyhow::Result<()> {
-                    let mut child = std::process::Command::new(GIT_NAME)
-                        .args(["check-attr", "--stdin", "-a"])
-                        .stdin(std::process::Stdio::piped())
-                        .stdout(std::process::Stdio::piped())
-                        .stderr(std::process::Stdio::null())
-                        .current_dir(path)
-                        .spawn()?;
+                    let mut child =
+                        std::process::Command::from(gix::command::prepare(gix::path::env::exe_invocation()))
+                            .args(["check-attr", "--stdin", "-a"])
+                            .stdin(std::process::Stdio::piped())
+                            .stdout(std::process::Stdio::piped())
+                            .stderr(std::process::Stdio::null())
+                            .current_dir(path)
+                            .spawn()?;
 
                     std::thread::spawn({
                         let mut stdin = child.stdin.take().expect("we configured it");
@@ -125,13 +126,14 @@ pub(crate) mod function {
                 let tx_base = tx_base.clone();
                 let mut progress = progress.add_child("excludes");
                 move || -> anyhow::Result<()> {
-                    let mut child = std::process::Command::new(GIT_NAME)
-                        .args(["check-ignore", "--stdin", "-nv", "--no-index"])
-                        .stdin(std::process::Stdio::piped())
-                        .stdout(std::process::Stdio::piped())
-                        .stderr(std::process::Stdio::null())
-                        .current_dir(path)
-                        .spawn()?;
+                    let mut child =
+                        std::process::Command::from(gix::command::prepare(gix::path::env::exe_invocation()))
+                            .args(["check-ignore", "--stdin", "-nv", "--no-index"])
+                            .stdin(std::process::Stdio::piped())
+                            .stdout(std::process::Stdio::piped())
+                            .stderr(std::process::Stdio::null())
+                            .current_dir(path)
+                            .spawn()?;
 
                     std::thread::spawn({
                         let mut stdin = child.stdin.take().expect("we configured it");
@@ -192,9 +194,7 @@ pub(crate) mod function {
         );
 
         for (rela_path, baseline) in rx_base {
-            let entry = cache.at_entry(rela_path.as_str(), Some(false), |oid, buf| {
-                repo.objects.find_blob(oid, buf)
-            })?;
+            let entry = cache.at_entry(rela_path.as_str(), None)?;
             match baseline {
                 Baseline::Attribute { assignments: expected } => {
                     entry.matching_attributes(&mut matches);
@@ -215,7 +215,7 @@ pub(crate) mod function {
                                     actual: matches.iter().map(|m| m.assignment.to_owned()).collect(),
                                     expected,
                                 },
-                            ))
+                            ));
                         }
                     }
                 }
@@ -228,7 +228,7 @@ pub(crate) mod function {
                                 actual: match_.map(Into::into),
                                 expected: location,
                             },
-                        ))
+                        ));
                     }
                 }
             }
@@ -251,15 +251,10 @@ pub(crate) mod function {
                 "{}: Validation failed with {} mismatches out of {}",
                 gix::path::realpath(repo.work_dir().unwrap_or(repo.git_dir()))?.display(),
                 mismatches.len(),
-                progress
-                    .counter()
-                    .map(|a| a.load(Ordering::Relaxed))
-                    .unwrap_or_default()
+                progress.counter().load(Ordering::Relaxed)
             );
         }
     }
-
-    static GIT_NAME: &str = if cfg!(windows) { "git.exe" } else { "git" };
 
     enum Baseline {
         Attribute { assignments: Vec<gix::attrs::Assignment> },
@@ -267,6 +262,8 @@ pub(crate) mod function {
     }
 
     #[derive(Debug)]
+    // See note on `Mismatch`
+    #[allow(dead_code)]
     pub struct ExcludeLocation {
         pub line: usize,
         pub rela_source_file: String,
@@ -274,6 +271,9 @@ pub(crate) mod function {
     }
 
     #[derive(Debug)]
+    // We debug-print this structure, which makes all fields 'used', but it doesn't count.
+    // TODO: find a way to not have to do more work, but make the warning go away.
+    #[allow(dead_code)]
     pub enum Mismatch {
         Attributes {
             actual: Vec<gix::attrs::Assignment>,
@@ -286,6 +286,8 @@ pub(crate) mod function {
     }
 
     #[derive(Debug)]
+    // See note on `Mismatch`
+    #[allow(dead_code)]
     pub struct ExcludeMatch {
         pub pattern: gix::glob::Pattern,
         pub source: Option<PathBuf>,
@@ -303,13 +305,13 @@ pub(crate) mod function {
     }
 
     fn parse_exclude(line: &str) -> Option<(String, Baseline)> {
-        let (left, value) = line.split_at(line.find(|c| c == '\t')?);
+        let (left, value) = line.split_at(line.find('\t')?);
         let value = &value[1..];
 
         let location = if left == "::" {
             None
         } else {
-            let mut tokens = left.split(|b| b == ':');
+            let mut tokens = left.split(':');
             let source = tokens.next()?;
             let line_number: usize = tokens.next()?.parse().ok()?;
             let pattern = tokens.next()?;
@@ -361,8 +363,8 @@ pub(crate) mod function {
                 "unspecified" => StateRef::Unspecified,
                 _ => StateRef::from_bytes(info.as_bytes()),
             };
-            path = path.trim_end_matches(|b| b == ':');
-            let attr = attr.trim_end_matches(|b| b == ':');
+            path = path.trim_end_matches(':');
+            let attr = attr.trim_end_matches(':');
             let assignment = gix::attrs::AssignmentRef {
                 name: gix::attrs::NameRef::try_from(attr.as_bytes().as_bstr()).ok()?,
                 state,

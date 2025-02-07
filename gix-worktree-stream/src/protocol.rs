@@ -1,8 +1,6 @@
-use std::io::{ErrorKind, Read, Write};
-
-use gix_object::bstr::{BStr, BString};
-
 use crate::utils;
+use gix_object::bstr::{BStr, BString};
+use std::io::{self, ErrorKind, Read, Write};
 
 // Format: [usize-LE][usize-LE][byte][byte][hash][relative_path_bytes][object_stream]
 // Note that stream_len can be usize::MAX to indicate the stream size is unknown
@@ -23,7 +21,7 @@ pub(crate) fn read_entry_info(
     let mut hash = hash_kind.null();
     read.read_exact(hash.as_mut_slice())?;
 
-    clear_and_set_len(path_buf, path_len);
+    clear_and_set_len(path_buf, path_len)?;
     read.read_exact(path_buf)?;
 
     Ok(((stream_size != usize::MAX).then_some(stream_size), mode, hash))
@@ -65,7 +63,7 @@ pub(crate) fn write_stream(
     out: &mut gix_features::io::pipe::Writer,
 ) -> std::io::Result<()> {
     const BUF_LEN: usize = u16::MAX as usize;
-    clear_and_set_len(buf, BUF_LEN);
+    clear_and_set_len(buf, BUF_LEN)?;
 
     // We know how `out` works in a pipe writer, it's always writing everything.
     #[allow(clippy::unused_io_amount)]
@@ -96,7 +94,7 @@ fn byte_to_hash(b: u8) -> gix_hash::Kind {
 }
 
 fn byte_to_mode(b: u8) -> gix_object::tree::EntryMode {
-    use gix_object::tree::EntryMode::*;
+    use gix_object::tree::EntryKind::*;
     match b {
         0 => Tree,
         1 => Blob,
@@ -105,6 +103,7 @@ fn byte_to_mode(b: u8) -> gix_object::tree::EntryMode {
         4 => Commit,
         _ => unreachable!("BUG: we control the protocol"),
     }
+    .into()
 }
 
 fn hash_to_byte(h: gix_hash::Kind) -> u8 {
@@ -114,8 +113,8 @@ fn hash_to_byte(h: gix_hash::Kind) -> u8 {
 }
 
 fn mode_to_byte(m: gix_object::tree::EntryMode) -> u8 {
-    use gix_object::tree::EntryMode::*;
-    match m {
+    use gix_object::tree::EntryKind::*;
+    match m.kind() {
         Tree => 0,
         Blob => 1,
         BlobExecutable => 2,
@@ -124,15 +123,9 @@ fn mode_to_byte(m: gix_object::tree::EntryMode) -> u8 {
     }
 }
 
-fn clear_and_set_len(buf: &mut Vec<u8>, len: usize) {
+fn clear_and_set_len(buf: &mut Vec<u8>, len: usize) -> io::Result<()> {
     buf.clear();
-    if buf.capacity() < len {
-        buf.reserve(len);
-        assert!(buf.capacity() >= len, "{} >= {}", buf.capacity(), len);
-    }
-    // SAFETY: we just assured that `buf` has the right capacity to hold `cap`
-    #[allow(unsafe_code)]
-    unsafe {
-        buf.set_len(len);
-    }
+    buf.try_reserve(len).map_err(|_| ErrorKind::OutOfMemory)?;
+    buf.resize(len, 0);
+    Ok(())
 }

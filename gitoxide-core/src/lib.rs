@@ -22,14 +22,15 @@
 //!
 //! ## Feature Flags
 #![cfg_attr(
-    feature = "document-features",
-    cfg_attr(doc, doc = ::document_features::document_features!())
+    all(doc, feature = "document-features"),
+    doc = ::document_features::document_features!()
 )]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(all(doc, feature = "document-features"), feature(doc_cfg, doc_auto_cfg))]
 #![cfg_attr(feature = "async-client", allow(unused))]
 #![deny(rust_2018_idioms)]
 #![forbid(unsafe_code)]
 
+use anyhow::bail;
 use std::str::FromStr;
 
 #[derive(Debug, Eq, PartialEq, Hash, Clone, Copy)]
@@ -79,5 +80,61 @@ pub mod pack;
 pub mod query;
 pub mod repository;
 
+mod discover;
+pub use discover::discover;
+
+pub fn env(mut out: impl std::io::Write, format: OutputFormat) -> anyhow::Result<()> {
+    if format != OutputFormat::Human {
+        bail!("JSON output isn't supported");
+    };
+
+    let width = 15;
+    writeln!(
+        out,
+        "{field:>width$}: {}",
+        std::path::Path::new(gix::path::env::shell()).display(),
+        field = "shell",
+    )?;
+    writeln!(
+        out,
+        "{field:>width$}: {:?}",
+        gix::path::env::installation_config_prefix(),
+        field = "config prefix",
+    )?;
+    writeln!(
+        out,
+        "{field:>width$}: {:?}",
+        gix::path::env::installation_config(),
+        field = "config",
+    )?;
+    writeln!(
+        out,
+        "{field:>width$}: {}",
+        gix::path::env::exe_invocation().display(),
+        field = "git exe",
+    )?;
+    writeln!(
+        out,
+        "{field:>width$}: {:?}",
+        gix::path::env::system_prefix(),
+        field = "system prefix",
+    )?;
+    writeln!(
+        out,
+        "{field:>width$}: {:?}",
+        gix::path::env::core_dir(),
+        field = "core dir",
+    )?;
+    Ok(())
+}
+
 #[cfg(all(feature = "async-client", feature = "blocking-client"))]
 compile_error!("Cannot set both 'blocking-client' and 'async-client' features as they are mutually exclusive");
+
+fn is_dir_to_mode(is_dir: bool) -> gix::index::entry::Mode {
+    if is_dir {
+        gix::index::entry::Mode::DIR
+    } else {
+        gix::index::entry::Mode::FILE
+    }
+}

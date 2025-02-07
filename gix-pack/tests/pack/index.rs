@@ -19,7 +19,7 @@ mod version {
         #[test]
         fn lookup() -> Result<(), Box<dyn std::error::Error>> {
             let object_hash = gix_hash::Kind::Sha1;
-            let file = index::File::at(&fixture_path(INDEX_V1), object_hash)?;
+            let file = index::File::at(fixture_path(INDEX_V1), object_hash)?;
             for (id, desired_index, assertion) in &[
                 (&b"036bd66fe9b6591e959e6df51160e636ab1a682e"[..], Some(0), "first"),
                 (b"f7f791d96b9a34ef0f08db4b007c5309b9adc3d6", Some(65), "close to last"),
@@ -39,7 +39,7 @@ mod version {
                     assert_eq!(entry.crc32, file.crc32_at_index(index));
 
                     let hex_len = (entry_index % object_hash.len_in_hex()).max(7);
-                    let prefix = gix_hash::Prefix::new(entry.oid, hex_len)?;
+                    let prefix = gix_hash::Prefix::new(&entry.oid, hex_len)?;
                     assert_eq!(
                         file.lookup_prefix(prefix, candidates.as_mut())
                             .expect("object exists")
@@ -47,7 +47,7 @@ mod version {
                         index
                     );
                     if let Some(candidates) = candidates {
-                        assert_eq!(candidates, index..index + 1)
+                        assert_eq!(candidates, index..index + 1);
                     }
                 }
             }
@@ -63,7 +63,7 @@ mod version {
         #[test]
         fn lookup() -> Result<(), Box<dyn std::error::Error>> {
             let object_hash = gix_hash::Kind::Sha1;
-            let file = index::File::at(&fixture_path(INDEX_V2), object_hash)?;
+            let file = index::File::at(fixture_path(INDEX_V2), object_hash)?;
             for (id, expected, assertion_message, hex_len) in [
                 (&b"0ead45fc727edcf5cadca25ef922284f32bb6fc1"[..], Some(0), "first", 4),
                 (b"e800b9c207e17f9b11e321cc1fba5dfe08af4222", Some(29), "last", 40),
@@ -73,7 +73,7 @@ mod version {
                     let id = gix_hash::ObjectId::from_hex(id)?;
                     assert_eq!(file.lookup(id), expected, "{assertion_message}");
                     assert_eq!(
-                        file.lookup_prefix(gix_hash::Prefix::new(id, hex_len)?, candidates.as_mut()),
+                        file.lookup_prefix(gix_hash::Prefix::new(&id, hex_len)?, candidates.as_mut()),
                         expected.map(Ok)
                     );
                     if let Some(candidates) = candidates {
@@ -92,7 +92,7 @@ mod version {
                     assert_eq!(entry.crc32, file.crc32_at_index(index), "{index} {entry:?}");
 
                     let hex_len = (entry_index % object_hash.len_in_hex()).max(7);
-                    let prefix = gix_hash::Prefix::new(entry.oid, hex_len)?;
+                    let prefix = gix_hash::Prefix::new(&entry.oid, hex_len)?;
                     assert_eq!(
                         file.lookup_prefix(prefix, candidates.as_mut())
                             .expect("object exists")
@@ -108,7 +108,7 @@ mod version {
         }
     }
 
-    #[cfg(feature = "internal-testing-gix-features-parallel")]
+    #[cfg(feature = "gix-features-parallel")]
     mod any {
         use std::{fs, io, sync::atomic::AtomicBool};
 
@@ -133,7 +133,7 @@ mod version {
                 index_path: &&str,
                 data_path: &&str,
             ) -> Result<(), Box<dyn std::error::Error>> {
-                let pack_iter = pack::data::input::BytesToEntriesIter::new_from_header(
+                let mut pack_iter = pack::data::input::BytesToEntriesIter::new_from_header(
                     io::BufReader::new(fs::File::open(fixture_path(data_path))?),
                     *mode,
                     *compressed,
@@ -148,12 +148,12 @@ mod version {
                     desired_kind,
                     || {
                         let file = std::fs::File::open(fixture_path(data_path))?;
-                        let map = unsafe { memmap2::Mmap::map(&file)? };
+                        let map = unsafe { memmap2::MmapOptions::new().map_copy_read_only(&file)? };
                         Ok((slice_map, map))
                     },
-                    pack_iter,
+                    &mut pack_iter,
                     None,
-                    progress::Discard,
+                    &mut progress::Discard,
                     &mut actual,
                     &AtomicBool::new(false),
                     gix_hash::Kind::Sha1,
@@ -210,7 +210,7 @@ mod version {
                 assert_eq!(outcome.index_version, desired_kind);
                 assert_eq!(
                     outcome.index_hash,
-                    gix_hash::ObjectId::from(&expected[end_of_pack_hash..end_of_index_hash])
+                    gix_hash::ObjectId::try_from(&expected[end_of_pack_hash..end_of_index_hash])?
                 );
                 Ok(())
             }
@@ -227,7 +227,7 @@ mod version {
         #[test]
         fn lookup_missing() {
             let file = index::File::at(&fixture_path(INDEX_V2), gix_hash::Kind::Sha1).unwrap();
-            let prefix = gix_hash::Prefix::new(gix_hash::ObjectId::null(gix_hash::Kind::Sha1), 7).unwrap();
+            let prefix = gix_hash::Prefix::new(&gix_hash::Kind::Sha1.null(), 7).unwrap();
             assert!(file.lookup_prefix(prefix, None).is_none());
 
             let mut candidates = 1..1;
@@ -253,7 +253,7 @@ fn traverse_with_index_and_forward_ref_deltas() {
                 count.fetch_add(1, Ordering::SeqCst);
                 Ok::<_, std::io::Error>(())
             },
-            progress::Discard,
+            &mut progress::Discard,
             &AtomicBool::new(false),
             index::traverse::with_index::Options::default(),
         )
@@ -363,8 +363,8 @@ fn pack_lookup() -> Result<(), Box<dyn std::error::Error>> {
             },
         ),
     ] {
-        let idx = index::File::at(&fixture_path(index_path), gix_hash::Kind::Sha1)?;
-        let pack = pack::data::File::at(&fixture_path(pack_path), gix_hash::Kind::Sha1)?;
+        let idx = index::File::at(fixture_path(index_path), gix_hash::Kind::Sha1)?;
+        let pack = pack::data::File::at(fixture_path(pack_path), gix_hash::Kind::Sha1)?;
 
         assert_eq!(pack.version(), pack::data::Version::V2);
         assert_eq!(pack.num_objects(), idx.num_objects());
@@ -381,7 +381,7 @@ fn pack_lookup() -> Result<(), Box<dyn std::error::Error>> {
                                 thread_limit: None
                             }
                         }),
-                        progress::Discard,
+                        &mut progress::Discard,
                         &AtomicBool::new(false)
                     )
                     .map(|o| (o.actual_index_checksum, o.pack_traverse_statistics))?,
@@ -398,7 +398,7 @@ fn pack_lookup() -> Result<(), Box<dyn std::error::Error>> {
         let sorted_offsets = idx.sorted_offsets();
         assert_eq!(num_objects, sorted_offsets.len());
         for idx_entry in idx.iter() {
-            let pack_entry = pack.entry(idx_entry.pack_offset);
+            let pack_entry = pack.entry(idx_entry.pack_offset)?;
             assert_ne!(pack_entry.data_offset, idx_entry.pack_offset);
             assert!(sorted_offsets.binary_search(&idx_entry.pack_offset).is_ok());
         }
@@ -409,15 +409,14 @@ fn pack_lookup() -> Result<(), Box<dyn std::error::Error>> {
                 "iteration should yield the same pack offsets as the index"
             );
 
-            let mut buf = Vec::new();
-            buf.resize(entry.decompressed_size as usize, 0);
-            let pack_entry = pack.entry(offset_from_index);
+            let mut buf = vec![0u8; entry.decompressed_size as usize];
+            let pack_entry = pack.entry(offset_from_index)?;
             assert_eq!(
                 pack_entry.pack_offset(),
                 entry.pack_offset,
                 "index entry offset and computed pack offset must match"
             );
-            pack.decompress_entry(&pack_entry, &mut buf)?;
+            pack.decompress_entry(&pack_entry, &mut Default::default(), &mut buf)?;
 
             assert_eq!(
                 buf.len() as u64,
@@ -439,7 +438,7 @@ fn pack_lookup() -> Result<(), Box<dyn std::error::Error>> {
                     .compressed
                     .expect("bytes present in default configuration of streaming iter")
                     .len() as u64,
-                next_offset - entry.pack_offset - entry.header_size as u64,
+                next_offset - entry.pack_offset - u64::from(entry.header_size),
                 "we get the compressed bytes region after the head to the next entry"
             );
         }
@@ -472,13 +471,13 @@ fn iter() -> Result<(), Box<dyn std::error::Error>> {
             "0f3ea84cd1bba10c2a03d736a460635082833e59",
         ),
     ] {
-        let idx = index::File::at(&fixture_path(path), gix_hash::Kind::Sha1)?;
+        let idx = index::File::at(fixture_path(path), gix_hash::Kind::Sha1)?;
         assert_eq!(idx.version(), *kind);
         assert_eq!(idx.num_objects(), *num_objects);
         assert_eq!(
             idx.verify_integrity(
                 None::<gix_pack::index::verify::PackContext<'_, fn() -> cache::Never>>,
-                progress::Discard,
+                &mut progress::Discard,
                 &AtomicBool::new(false)
             )
             .map(|o| (o.actual_index_checksum, o.pack_traverse_statistics))?,

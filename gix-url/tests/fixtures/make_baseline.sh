@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -eu -o pipefail
 
 # list of urls that should be tested for all platforms
@@ -8,11 +8,12 @@ tests_unix=()
 # urls only intended for testing on Windows
 tests_windows=()
 
-# The contents and structure of this loop are a adaption
+# The contents and structure of this loop are an adaption
 # from git's own test suite (t/t5500-fetch-pack.sh).
 # Please do not change this loop and instead add additional
 # test cases at the bottom of this file.
 for path in "repo" "re:po" "re/po"; do
+  # normal urls
   for protocol in "ssh+git" "git+ssh" "git" "ssh"; do
     for host in "host" "user@host" "user@[::1]" "user@::1"; do
       for port_separator in "" ":"; do
@@ -25,6 +26,7 @@ for path in "repo" "re:po" "re/po"; do
       tests+=("$protocol://$host:22/$path")
     done
   done
+  # file protocol urls
   for protocol in "file"; do
     tests_unix+=("$protocol://$host/$path")
 
@@ -34,14 +36,14 @@ for path in "repo" "re:po" "re/po"; do
     tests_unix+=("$protocol://$host/~$path")
     tests_windows+=("$protocol://$host/~$path")
   done
+  # local paths
   for host in "nohost" "nohost:12" "[::1]" "[::1]:23" "[" "[:aa"; do
     tests+=("./$host:$path")
     tests+=("./$protocol:$host/~$path")
   done
-  protocol="ssh"
+  # SCP like urls
   for host in "host" "[::1]"; do
     tests+=("$host:$path")
-
     tests+=("$host:/~$path")
   done
 done
@@ -53,11 +55,21 @@ tests_windows+=("c:repo")
 tests_unix+=("${tests[@]}")
 tests_windows+=("${tests[@]}")
 
-for url in "${tests[@]}"
+# We will run `git fetch-pack` in this repo instead of the outer gitoxide repo,
+# for full isolation. This avoids assuming there *is* a gitoxide repo, and also
+# avoids `safe.directory` errors if the gitoxide repo has unusual ownership.
+git init -q temp-repo
+
+for url in "${tests_unix[@]}"
 do
   echo ";" # there are no `;` in the tested urls
-  git fetch-pack --diag-url "$url"
-done >git-baseline.generic
+  git -C temp-repo fetch-pack --diag-url "$url"
+done >git-baseline.unix
 
-# TODO: testing of platform specific behavior
+for url in "${tests_windows[@]}"
+do
+  echo ";" # there are no `;` in the tested urls
+  git -C temp-repo fetch-pack --diag-url "$url"
+done >git-baseline.windows
 
+rm -rf temp-repo

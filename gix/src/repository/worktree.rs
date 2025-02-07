@@ -2,7 +2,12 @@ use crate::{worktree, Worktree};
 
 /// Interact with individual worktrees and their information.
 impl crate::Repository {
-    /// Return a list of all _linked_ worktrees sorted by private git dir path as a lightweight proxy.
+    /// Return a list of all **linked** worktrees sorted by private git dir path as a lightweight proxy.
+    ///
+    /// This means the number is `0` even if there is the main worktree, as it is not counted as linked worktree.
+    /// This also means it will be `1` if there is one linked worktree next to the main worktree.
+    /// It's worth noting that a *bare* repository may have one or more linked worktrees, but has no *main* worktree,
+    /// which is the reason why the *possibly* available main worktree isn't listed here.
     ///
     /// Note that these need additional processing to become usable, but provide a first glimpse a typical worktree information.
     pub fn worktrees(&self) -> std::io::Result<Vec<worktree::Proxy<'_>>> {
@@ -19,7 +24,7 @@ impl crate::Repository {
                 res.push(worktree::Proxy {
                     parent: self,
                     git_dir: worktree_git_dir,
-                })
+                });
             }
         }
         res.sort_by(|a, b| a.git_dir.cmp(&b.git_dir));
@@ -61,12 +66,12 @@ impl crate::Repository {
         &self,
         id: impl Into<gix_hash::ObjectId>,
     ) -> Result<(gix_worktree_stream::Stream, gix_index::File), crate::repository::worktree_stream::Error> {
-        use gix_odb::{FindExt, HeaderExt};
+        use gix_odb::HeaderExt;
         let id = id.into();
         let header = self.objects.header(id)?;
         if !header.kind().is_tree() {
             return Err(crate::repository::worktree_stream::Error::NotATree {
-                id: id.to_owned(),
+                id,
                 actual: header.kind(),
             });
         }
@@ -75,19 +80,17 @@ impl crate::Repository {
         // TODO(perf): when loading a non-HEAD tree, we effectively traverse the tree twice. This is usually fast though, and sharing
         //             an object cache between the copies of the ODB handles isn't trivial and needs a lock.
         let index = self.index_from_tree(&id)?;
-        let mut cache = self.attributes_only(&index, gix_worktree::stack::state::attributes::Source::IdMapping)?;
-        let pipeline =
-            gix_filter::Pipeline::new(cache.attributes_collection(), crate::filter::Pipeline::options(self)?);
+        let mut cache = self
+            .attributes_only(&index, gix_worktree::stack::state::attributes::Source::IdMapping)?
+            .detach();
+        let pipeline = gix_filter::Pipeline::new(self.command_context()?, crate::filter::Pipeline::options(self)?);
         let objects = self.objects.clone().into_arc().expect("TBD error handling");
         let stream = gix_worktree_stream::from_tree(
             id,
-            {
-                let objects = objects.clone();
-                move |id, buf| objects.find(id, buf)
-            },
+            objects.clone(),
             pipeline,
             move |path, mode, attrs| -> std::io::Result<()> {
-                let entry = cache.at_entry(path, Some(mode.is_tree()), |id, buf| objects.find_blob(id, buf))?;
+                let entry = cache.at_entry(path, Some(mode.into()), &objects)?;
                 entry.matching_attributes(attrs);
                 Ok(())
             },
@@ -112,7 +115,7 @@ impl crate::Repository {
         &self,
         mut stream: gix_worktree_stream::Stream,
         out: impl std::io::Write + std::io::Seek,
-        mut blobs: impl gix_features::progress::Progress,
+        blobs: impl gix_features::progress::Count,
         should_interrupt: &std::sync::atomic::AtomicBool,
         options: gix_archive::Options,
     ) -> Result<(), crate::repository::worktree_archive::Error> {

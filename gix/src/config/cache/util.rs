@@ -3,7 +3,6 @@ use super::Error;
 use crate::{
     config,
     config::tree::{gitoxide, Core},
-    revision::spec::parse::ObjectKindHint,
 };
 
 pub(crate) fn interpolate_context<'a>(
@@ -39,7 +38,7 @@ pub(crate) fn config_bool(
         "BUG: key name and hardcoded name must match"
     );
     config
-        .boolean_by_key(key_str)
+        .boolean(key_str)
         .map_or(Ok(default), |res| key.enrich_error(res))
         .map_err(Error::from)
         .with_lenient_default(lenient)
@@ -51,9 +50,21 @@ pub(crate) fn query_refupdates(
 ) -> Result<Option<gix_ref::store::WriteReflog>, Error> {
     let key = "core.logAllRefUpdates";
     Core::LOG_ALL_REF_UPDATES
-        .try_into_ref_updates(config.boolean_by_key(key))
+        .try_into_ref_updates(config.boolean(key))
         .with_leniency(lenient_config)
         .map_err(Into::into)
+}
+
+pub(crate) fn query_refs_namespace(
+    config: &gix_config::File<'static>,
+    lenient_config: bool,
+) -> Result<Option<gix_ref::Namespace>, config::refs_namespace::Error> {
+    let key = "gitoxide.core.refsNamespace";
+    config
+        .string(key)
+        .map(|ns| gitoxide::Core::REFS_NAMESPACE.try_into_refs_namespace(ns))
+        .transpose()
+        .with_leniency(lenient_config)
 }
 
 pub(crate) fn reflog_or_default(
@@ -74,17 +85,17 @@ pub(crate) fn parse_object_caches(
     mut filter_config_section: fn(&gix_config::file::Metadata) -> bool,
 ) -> Result<(Option<usize>, Option<usize>, usize), Error> {
     let static_pack_cache_limit = config
-        .integer_filter_by_key("gitoxide.core.deltaBaseCacheLimit", &mut filter_config_section)
+        .integer_filter("gitoxide.core.deltaBaseCacheLimit", &mut filter_config_section)
         .map(|res| gitoxide::Core::DEFAULT_PACK_CACHE_MEMORY_LIMIT.try_into_usize(res))
         .transpose()
         .with_leniency(lenient)?;
     let pack_cache_bytes = config
-        .integer_filter_by_key("core.deltaBaseCacheLimit", &mut filter_config_section)
+        .integer_filter("core.deltaBaseCacheLimit", &mut filter_config_section)
         .map(|res| Core::DELTA_BASE_CACHE_LIMIT.try_into_usize(res))
         .transpose()
         .with_leniency(lenient)?;
     let object_cache_bytes = config
-        .integer_filter_by_key("gitoxide.objects.cacheLimit", &mut filter_config_section)
+        .integer_filter("gitoxide.objects.cacheLimit", &mut filter_config_section)
         .map(|res| gitoxide::Objects::CACHE_LIMIT.try_into_usize(res))
         .transpose()
         .with_leniency(lenient)?
@@ -97,17 +108,18 @@ pub(crate) fn parse_core_abbrev(
     object_hash: gix_hash::Kind,
 ) -> Result<Option<usize>, Error> {
     Ok(config
-        .string_by_key("core.abbrev")
+        .string("core.abbrev")
         .map(|abbrev| Core::ABBREV.try_into_abbreviation(abbrev, object_hash))
         .transpose()?
         .flatten())
 }
 
+#[cfg(feature = "revision")]
 pub(crate) fn disambiguate_hint(
     config: &gix_config::File<'static>,
     lenient_config: bool,
-) -> Result<Option<ObjectKindHint>, config::key::GenericErrorWithValue> {
-    match config.string_by_key("core.disambiguate") {
+) -> Result<Option<crate::revision::spec::parse::ObjectKindHint>, config::key::GenericErrorWithValue> {
+    match config.string("core.disambiguate") {
         None => Ok(None),
         Some(value) => Core::DISAMBIGUATE
             .try_into_object_kind_hint(value)

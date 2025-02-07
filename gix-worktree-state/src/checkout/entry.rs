@@ -1,18 +1,18 @@
 use std::{
-    fs::OpenOptions,
+    borrow::Cow,
     io::Write,
     path::{Path, PathBuf},
 };
 
 use bstr::BStr;
 use gix_filter::{driver::apply::MaybeDelayed, pipeline::convert::ToWorktreeOutcome};
-use gix_hash::oid;
 use gix_index::{entry::Stat, Entry};
+use gix_object::FindExt;
 use gix_worktree::Stack;
 use io_close::Close;
 
 pub struct Context<'a, Find> {
-    pub find: &'a mut Find,
+    pub objects: &'a mut Find,
     pub path_cache: &'a mut Stack,
     pub filters: &'a mut gix_filter::Pipeline,
     pub buf: &'a mut Vec<u8>,
@@ -53,11 +53,11 @@ impl Outcome<'_> {
 }
 
 #[cfg_attr(not(unix), allow(unused_variables))]
-pub fn checkout<'entry, Find, E>(
+pub fn checkout<'entry, Find>(
     entry: &'entry mut Entry,
     entry_path: &'entry BStr,
     Context {
-        find,
+        objects,
         filters,
         path_cache,
         buf,
@@ -73,30 +73,29 @@ pub fn checkout<'entry, Find, E>(
         filter_process_delay,
         ..
     }: crate::checkout::chunk::Options,
-) -> Result<Outcome<'entry>, crate::checkout::Error<E>>
+) -> Result<Outcome<'entry>, crate::checkout::Error>
 where
-    Find: for<'a> FnMut(&oid, &'a mut Vec<u8>) -> Result<gix_object::BlobRef<'a>, E>,
-    E: std::error::Error + Send + Sync + 'static,
+    Find: gix_object::Find,
 {
     let dest_relative = gix_path::try_from_bstr(entry_path).map_err(|_| crate::checkout::Error::IllformedUtf8 {
         path: entry_path.to_owned(),
     })?;
-    let is_dir = Some(entry.mode == gix_index::entry::Mode::COMMIT || entry.mode == gix_index::entry::Mode::DIR);
-    let path_cache = path_cache.at_path(dest_relative, is_dir, &mut *find)?;
+    let path_cache = path_cache.at_path(dest_relative, Some(entry.mode), &*objects)?;
     let dest = path_cache.path();
 
     let object_size = match entry.mode {
         gix_index::entry::Mode::FILE | gix_index::entry::Mode::FILE_EXECUTABLE => {
-            let obj = find(&entry.id, buf).map_err(|err| crate::checkout::Error::Find {
-                err,
-                oid: entry.id,
-                path: dest.to_path_buf(),
-            })?;
+            let obj = (*objects)
+                .find_blob(&entry.id, buf)
+                .map_err(|err| crate::checkout::Error::Find {
+                    err,
+                    path: dest.to_path_buf(),
+                })?;
 
             let filtered = filters.convert_to_worktree(
                 obj.data,
                 entry_path,
-                |_, attrs| {
+                &mut |_, attrs| {
                     path_cache.matching_attributes(attrs);
                 },
                 filter_process_delay,
@@ -136,21 +135,29 @@ where
             };
 
             // For possibly existing, overwritten files, we must change the file mode explicitly.
-            finalize_entry(entry, file, set_executable_after_creation.then_some(dest))?;
+            finalize_entry(entry, file, set_executable_after_creation)?;
             num_bytes
         }
         gix_index::entry::Mode::SYMLINK => {
-            let obj = find(&entry.id, buf).map_err(|err| crate::checkout::Error::Find {
-                err,
-                oid: entry.id,
-                path: dest.to_path_buf(),
-            })?;
-            let symlink_destination = gix_path::try_from_byte_slice(obj.data)
-                .map_err(|_| crate::checkout::Error::IllformedUtf8 { path: obj.data.into() })?;
-
+            let obj = (*objects)
+                .find_blob(&entry.id, buf)
+                .map_err(|err| crate::checkout::Error::Find {
+                    err,
+                    path: dest.to_path_buf(),
+                })?;
             if symlink {
+                #[cfg_attr(not(windows), allow(unused_mut))]
+                let mut symlink_destination = Cow::Borrowed(
+                    gix_path::try_from_byte_slice(obj.data)
+                        .map_err(|_| crate::checkout::Error::IllformedUtf8 { path: obj.data.into() })?,
+                );
+                #[cfg(windows)]
+                {
+                    symlink_destination = gix_path::to_native_path_on_windows(gix_path::into_bstr(symlink_destination))
+                }
+
                 try_op_or_unlink(dest, overwrite_existing, |p| {
-                    gix_fs::symlink::create(symlink_destination, p)
+                    gix_fs::symlink::create(symlink_destination.as_ref(), p)
                 })?;
             } else {
                 let mut file = try_op_or_unlink(dest, overwrite_existing, |p| {
@@ -160,7 +167,7 @@ where
                 file.close()?;
             }
 
-            entry.stat = Stat::from_fs(&std::fs::symlink_metadata(dest)?)?;
+            entry.stat = Stat::from_fs(&gix_index::fs::Metadata::from_path_no_follow(dest)?)?;
             obj.data.len()
         }
         gix_index::entry::Mode::DIR => {
@@ -229,7 +236,7 @@ fn debug_assert_dest_is_no_symlink(path: &Path) {
     }
 }
 
-fn open_options(path: &Path, destination_is_initially_empty: bool, overwrite_existing: bool) -> OpenOptions {
+fn open_options(path: &Path, destination_is_initially_empty: bool, overwrite_existing: bool) -> std::fs::OpenOptions {
     if overwrite_existing || !destination_is_initially_empty {
         debug_assert_dest_is_no_symlink(path);
     }
@@ -237,7 +244,8 @@ fn open_options(path: &Path, destination_is_initially_empty: bool, overwrite_exi
     options
         .create_new(destination_is_initially_empty && !overwrite_existing)
         .create(!destination_is_initially_empty || overwrite_existing)
-        .write(true);
+        .write(true)
+        .truncate(true);
     options
 }
 
@@ -267,27 +275,118 @@ pub(crate) fn open_file(
     try_op_or_unlink(path, overwrite_existing, |p| options.open(p)).map(|f| (f, set_executable_after_creation))
 }
 
-/// Close `file` and store its stats in `entry`, possibly setting `file` executable depending on `set_executable_after_creation`.
-#[cfg_attr(windows, allow(unused_variables))]
-pub(crate) fn finalize_entry<E>(
+/// Close `file` and store its stats in `entry`, possibly setting `file` executable.
+pub(crate) fn finalize_entry(
     entry: &mut gix_index::Entry,
     file: std::fs::File,
-    set_executable_after_creation: Option<&Path>,
-) -> Result<(), crate::checkout::Error<E>>
-where
-    E: std::error::Error + Send + Sync + 'static,
-{
+    #[cfg_attr(windows, allow(unused_variables))] set_executable_after_creation: bool,
+) -> Result<(), crate::checkout::Error> {
     // For possibly existing, overwritten files, we must change the file mode explicitly.
     #[cfg(unix)]
-    if let Some(path) = set_executable_after_creation {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perm = std::fs::symlink_metadata(path)?.permissions();
-        perm.set_mode(0o777);
-        std::fs::set_permissions(path, perm)?;
+    if set_executable_after_creation {
+        set_executable(&file)?;
     }
     // NOTE: we don't call `file.sync_all()` here knowing that some filesystems don't handle this well.
     //       revisit this once there is a bug to fix.
-    entry.stat = Stat::from_fs(&file.metadata()?)?;
+    entry.stat = Stat::from_fs(&gix_index::fs::Metadata::from_file(&file)?)?;
     file.close()?;
     Ok(())
+}
+
+/// Use `fstat` and `fchmod` on a file descriptor to make a regular file executable.
+///
+/// See `let_readers_execute` for the exact details of how the mode is transformed.
+#[cfg(unix)]
+fn set_executable(file: &std::fs::File) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let old_mode = file.metadata()?.mode();
+    let new_mode = let_readers_execute(old_mode);
+    file.set_permissions(std::fs::Permissions::from_mode(new_mode))?;
+    Ok(())
+}
+
+/// Given the st_mode of a regular file, compute the mode with executable bits safely added.
+///
+/// Currently this adds executable bits for whoever has read bits already. It doesn't use the umask.
+/// Set-user-ID and set-group-ID bits are unset for safety. The sticky bit is also unset.
+///
+/// This returns only mode bits, not file type. The return value can be used in chmod or fchmod.
+#[cfg(any(unix, test))]
+fn let_readers_execute(mut mode: u32) -> u32 {
+    assert_eq!(mode & 0o170000, 0o100000, "bug in caller if not from a regular file");
+    mode &= 0o777; // Clear type, non-rwx mode bits (setuid, setgid, sticky).
+    mode |= (mode & 0o444) >> 2; // Let readers also execute.
+    mode
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn let_readers_execute() {
+        let cases = [
+            // Common cases:
+            (0o100755, 0o755),
+            (0o100644, 0o755),
+            (0o100750, 0o750),
+            (0o100640, 0o750),
+            (0o100700, 0o700),
+            (0o100600, 0o700),
+            (0o100775, 0o775),
+            (0o100664, 0o775),
+            (0o100770, 0o770),
+            (0o100660, 0o770),
+            (0o100764, 0o775),
+            (0o100760, 0o770),
+            // Less common:
+            (0o100674, 0o775),
+            (0o100670, 0o770),
+            (0o100000, 0o000),
+            (0o100400, 0o500),
+            (0o100440, 0o550),
+            (0o100444, 0o555),
+            (0o100462, 0o572),
+            (0o100242, 0o252),
+            (0o100167, 0o177),
+            // With set-user-ID, set-group-ID, and sticky bits:
+            (0o104755, 0o755),
+            (0o104644, 0o755),
+            (0o102755, 0o755),
+            (0o102644, 0o755),
+            (0o101755, 0o755),
+            (0o101644, 0o755),
+            (0o106755, 0o755),
+            (0o106644, 0o755),
+            (0o104750, 0o750),
+            (0o104640, 0o750),
+            (0o102750, 0o750),
+            (0o102640, 0o750),
+            (0o101750, 0o750),
+            (0o101640, 0o750),
+            (0o106750, 0o750),
+            (0o106640, 0o750),
+            (0o107644, 0o755),
+            (0o107000, 0o000),
+            (0o106400, 0o500),
+            (0o102462, 0o572),
+        ];
+        for (st_mode, expected) in cases {
+            let actual = super::let_readers_execute(st_mode);
+            assert_eq!(
+                actual, expected,
+                "{st_mode:06o} should become {expected:04o}, became {actual:04o}"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn let_readers_execute_panics_on_directory() {
+        super::let_readers_execute(0o040644);
+    }
+
+    #[test]
+    #[should_panic]
+    fn let_readers_execute_should_panic_on_symlink() {
+        super::let_readers_execute(0o120644);
+    }
 }

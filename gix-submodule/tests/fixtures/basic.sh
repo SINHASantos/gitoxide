@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -eu -o pipefail
 
 set -x
@@ -36,4 +36,13 @@ git clone super relative-clone
 git clone super recursive-clone 
 (cd recursive-clone
   git submodule update --init --recursive
+)
+
+git clone super not-a-submodule
+(cd not-a-submodule
+  cp .gitmodules modules.bak
+  git rm submodule
+  echo fake > submodule
+  mv modules.bak .gitmodules
+  git add submodule && git commit -m "no submodule in index and commit, but in configuration"
 )

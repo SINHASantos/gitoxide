@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     convert::Infallible,
     sync::atomic::{AtomicUsize, Ordering},
     time::Instant,
@@ -7,12 +8,12 @@ use std::{
 use anyhow::{anyhow, bail};
 use gix::{
     bstr::{BStr, BString, ByteSlice},
+    diff::{blob::platform::prepare_diff::Operation, rewrites::CopySource},
     features::progress,
-    object::tree::diff::rewrites::CopySource,
-    odb::FindExt,
+    objs::find::Error,
     parallel::{InOrderIter, SequenceId},
     prelude::ObjectIdExt,
-    Progress,
+    Count, Progress,
 };
 use rusqlite::{params, Statement, Transaction};
 
@@ -21,7 +22,7 @@ use crate::query::Options;
 pub fn update(
     repo: &gix::Repository,
     con: &mut rusqlite::Connection,
-    progress: &mut impl gix::Progress,
+    progress: &mut impl gix::NestedProgress,
     mut err: impl std::io::Write,
     Options {
         object_cache_size_mb,
@@ -37,28 +38,28 @@ pub fn update(
         p.init(None, progress::count("commits"));
         p
     };
-    let stat_counter = stat_progress.counter().expect("shared counter available");
+    let stat_counter = stat_progress.counter();
 
     let mut db_progress = {
         let mut p = progress.add_child("db cache");
         p.init(None, progress::count("events"));
         p
     };
-    let commit_counter = db_progress.counter().expect("shared counter available");
+    let commit_counter = db_progress.counter();
 
     let change_progress = {
         let mut p = progress.add_child("find changes");
         p.init(None, progress::count("modified files"));
         p
     };
-    let change_counter = change_progress.counter().expect("shared counter available");
+    let change_counter = change_progress.counter();
 
     let lines_progress = {
         let mut p = progress.add_child("find changes");
         p.init(None, progress::count("diff lines"));
         p
     };
-    let lines_counter = lines_progress.counter().expect("shared counter available");
+    let lines_counter = lines_progress.counter();
 
     let mut traverse_progress = progress.add_child("traverse commit graph");
     traverse_progress.init(None, progress::count("commits"));
@@ -138,11 +139,15 @@ pub fn update(
         });
 
         let rewrites = {
-            let mut r =
-                gix::object::tree::diff::Rewrites::try_from_config(&repo.config_snapshot(), true)?.unwrap_or_default();
-            r.copies = Some(gix::object::tree::diff::rewrites::Copies {
+            // These are either configured, or we set them to the default. There is no turning them off.
+            let (r, was_configured) = gix::diff::new_rewrites(&repo.config_snapshot(), true)?;
+            if was_configured && r.is_none() {
+                gix::trace::warn!("Rename tracking is disabled by configuration, but we enable it using the default");
+            }
+            let mut r = r.unwrap_or_default();
+            r.copies = Some(gix::diff::rewrites::Copies {
                 source: if find_copies_harder {
-                    CopySource::FromSetOfModifiedFilesAndSourceTree
+                    CopySource::FromSetOfModifiedFilesAndAllSources
                 } else {
                     CopySource::FromSetOfModifiedFiles
                 },
@@ -150,13 +155,18 @@ pub fn update(
             });
             r
         };
+
+        #[derive(Clone)]
         struct Task {
             commit: gix::hash::ObjectId,
             parent_commit: Option<gix::hash::ObjectId>,
             compute_stats: bool,
         }
+
+        type Packet = (SequenceId, Vec<Task>);
+
         let (tx_tree_ids, stat_threads) = {
-            let (tx, rx) = crossbeam_channel::unbounded::<(SequenceId, Vec<Task>)>();
+            let (tx, rx) = crossbeam_channel::unbounded::<Packet>();
             let stat_workers = (0..threads)
                 .map(|_| {
                     scope.spawn({
@@ -168,6 +178,9 @@ pub fn update(
                         repo.object_cache_size_if_unset((object_cache_size_mb * 1024 * 1024) / threads);
                         let rx = rx.clone();
                         move || -> anyhow::Result<()> {
+                            let mut rewrite_cache =
+                                repo.diff_resource_cache(gix::diff::blob::pipeline::Mode::ToGit, Default::default())?;
+                            let mut diff_cache = rewrite_cache.clone();
                             for (chunk_id, chunk) in rx {
                                 let mut out_chunk = Vec::with_capacity(chunk.len());
                                 for Task {
@@ -196,16 +209,24 @@ pub fn update(
                                             Some(c) => c,
                                             None => continue,
                                         };
+                                        rewrite_cache.clear_resource_cache_keep_allocation();
+                                        diff_cache.clear_resource_cache_keep_allocation();
                                         from.changes()?
-                                            .track_path()
-                                            .track_rewrites(Some(rewrites))
-                                            .for_each_to_obtain_tree(&to, |change| {
-                                                use gix::object::tree::diff::change::Event::*;
+                                            .options(|opts| {
+                                                opts.track_path().track_rewrites(Some(rewrites));
+                                            })
+                                            .for_each_to_obtain_tree_with_cache(&to, &mut rewrite_cache, |change| {
+                                                use gix::object::tree::diff::Change::*;
                                                 change_counter.fetch_add(1, Ordering::SeqCst);
-                                                match change.event {
-                                                    Addition { entry_mode, id } => {
+                                                match change {
+                                                    Addition {
+                                                        entry_mode,
+                                                        id,
+                                                        location,
+                                                        ..
+                                                    } => {
                                                         if entry_mode.is_blob_or_symlink() {
-                                                            add_lines(&mut out, change.location, &lines_counter, id);
+                                                            add_lines(&mut out, location, &lines_counter, id);
                                                         }
                                                     }
                                                     Modification {
@@ -213,60 +234,79 @@ pub fn update(
                                                         previous_entry_mode,
                                                         id,
                                                         previous_id,
+                                                        location,
                                                     } => match (previous_entry_mode.is_blob(), entry_mode.is_blob()) {
                                                         (false, false) => {}
                                                         (false, true) => {
-                                                            add_lines(&mut out, change.location, &lines_counter, id);
+                                                            add_lines(&mut out, location, &lines_counter, id);
                                                         }
                                                         (true, false) => {
-                                                            add_lines(
-                                                                &mut out,
-                                                                change.location,
-                                                                &lines_counter,
-                                                                previous_id,
-                                                            );
+                                                            add_lines(&mut out, location, &lines_counter, previous_id);
                                                         }
                                                         (true, true) => {
-                                                            // TODO: use git attributes here to know if it's a binary file or not.
-                                                            if let Some(Ok(diff)) = change.event.diff() {
-                                                                let mut nl = 0;
-                                                                let tokens = diff.line_tokens();
-                                                                let counts = gix::diff::blob::diff(
-                                                                    diff.algo,
-                                                                    &tokens,
-                                                                    gix::diff::blob::sink::Counter::default(),
-                                                                );
-                                                                nl += counts.insertions as usize
-                                                                    + counts.removals as usize;
-                                                                let lines = LineStats {
-                                                                    added: counts.insertions as usize,
-                                                                    removed: counts.removals as usize,
-                                                                    before: tokens.before.len(),
-                                                                    after: tokens.after.len(),
-                                                                };
-                                                                lines_counter.fetch_add(nl, Ordering::SeqCst);
-                                                                out.push(FileChange {
-                                                                    relpath: change.location.to_owned(),
-                                                                    mode: FileMode::Modified,
-                                                                    source_relpath: None,
-                                                                    lines: Some(lines),
-                                                                });
+                                                            if let Ok(cache) =
+                                                                change.diff(&mut diff_cache).map(|p| p.resource_cache)
+                                                            {
+                                                                cache
+                                                                    .options
+                                                                    .skip_internal_diff_if_external_is_configured =
+                                                                    false;
+                                                                if let Ok(prep) = cache.prepare_diff() {
+                                                                    let mut nl = 0;
+                                                                    let tokens = prep.interned_input();
+                                                                    match prep.operation {
+                                                                        Operation::InternalDiff { algorithm } => {
+                                                                            let counts = gix::diff::blob::diff(
+                                                                                algorithm,
+                                                                                &tokens,
+                                                                                gix::diff::blob::sink::Counter::default(
+                                                                                ),
+                                                                            );
+                                                                            nl += counts.insertions as usize
+                                                                                + counts.removals as usize;
+                                                                            let lines = LineStats {
+                                                                                added: counts.insertions as usize,
+                                                                                removed: counts.removals as usize,
+                                                                                before: tokens.before.len(),
+                                                                                after: tokens.after.len(),
+                                                                            };
+                                                                            lines_counter
+                                                                                .fetch_add(nl, Ordering::SeqCst);
+                                                                            out.push(FileChange {
+                                                                                relpath: location.to_owned(),
+                                                                                mode: FileMode::Modified,
+                                                                                source_relpath: None,
+                                                                                lines: Some(lines),
+                                                                            });
+                                                                        }
+                                                                        Operation::ExternalCommand { .. } => {
+                                                                            unreachable!("disabled above")
+                                                                        }
+                                                                        Operation::SourceOrDestinationIsBinary => {}
+                                                                    }
+                                                                }
                                                             }
                                                         }
                                                     },
-                                                    Deletion { entry_mode, id } => {
+                                                    Deletion {
+                                                        entry_mode,
+                                                        id,
+                                                        location,
+                                                        ..
+                                                    } => {
                                                         if entry_mode.is_blob_or_symlink() {
-                                                            remove_lines(&mut out, change.location, &lines_counter, id);
+                                                            remove_lines(&mut out, location, &lines_counter, id);
                                                         }
                                                     }
                                                     Rewrite {
                                                         source_location,
                                                         diff,
                                                         copy,
+                                                        location,
                                                         ..
                                                     } => {
                                                         out.push(FileChange {
-                                                            relpath: change.location.to_owned(),
+                                                            relpath: location.to_owned(),
                                                             source_relpath: Some(source_location.to_owned()),
                                                             mode: if copy { FileMode::Copy } else { FileMode::Rename },
                                                             lines: diff.map(|d| LineStats {
@@ -288,7 +328,7 @@ pub fn update(
                                         out_chunk.push(CommitDiffStats {
                                             id: commit,
                                             changes: Vec::new(),
-                                        })
+                                        });
                                     }
                                 }
                                 if tx_stats.send(Ok((chunk_id, out_chunk))).is_err() {
@@ -304,46 +344,94 @@ pub fn update(
         };
         drop(tx_stats);
 
-        const CHUNK_SIZE: usize = 50;
-        let mut chunk = Vec::with_capacity(CHUNK_SIZE);
-        let mut chunk_id: SequenceId = 0;
-        let commit_iter = gix::interrupt::Iter::new(
-            commit_id.ancestors(|oid, buf| -> Result<_, gix::object::find::existing::Error> {
-                let obj = repo.objects.find(oid, buf)?;
-                traverse_progress.inc();
-                if known_commits.binary_search(&oid.to_owned()).is_err() {
+        #[derive(Clone)]
+        struct Db<'a, Find: Clone> {
+            inner: &'a Find,
+            progress: &'a dyn gix::progress::Count,
+            chunk: std::cell::RefCell<Vec<Task>>,
+            chunk_id: std::cell::RefCell<SequenceId>,
+            chunk_size: usize,
+            tx: crossbeam_channel::Sender<Packet>,
+            known_commits: &'a [gix::ObjectId],
+        }
+
+        impl<'a, Find> Db<'a, Find>
+        where
+            Find: gix::prelude::Find + Clone,
+        {
+            fn new(
+                inner: &'a Find,
+                progress: &'a dyn gix::progress::Count,
+                chunk_size: usize,
+                tx: crossbeam_channel::Sender<Packet>,
+                known_commits: &'a [gix::ObjectId],
+            ) -> Self {
+                Self {
+                    inner,
+                    progress,
+                    known_commits,
+                    tx,
+                    chunk_size,
+                    chunk_id: 0.into(),
+                    chunk: RefCell::new(Vec::with_capacity(chunk_size)),
+                }
+            }
+
+            fn send_last_chunk(self) {
+                self.tx.send((self.chunk_id.into_inner(), self.chunk.into_inner())).ok();
+            }
+        }
+
+        impl<Find> gix::prelude::Find for Db<'_, Find>
+        where
+            Find: gix::prelude::Find + Clone,
+        {
+            fn try_find<'b>(&self, id: &gix::oid, buf: &'b mut Vec<u8>) -> Result<Option<gix::objs::Data<'b>>, Error> {
+                let obj = self.inner.try_find(id, buf)?;
+                let Some(obj) = obj else { return Ok(None) };
+                if !obj.kind.is_commit() {
+                    return Ok(None);
+                }
+
+                self.progress.inc();
+                if self.known_commits.binary_search(&id.to_owned()).is_err() {
                     let res = {
                         let mut parents = gix::objs::CommitRefIter::from_bytes(obj.data).parent_ids();
-                        let res = parents.next().map(|first_parent| (Some(first_parent), oid.to_owned()));
+                        let res = parents.next().map(|first_parent| (Some(first_parent), id.to_owned()));
                         match parents.next() {
                             Some(_) => None,
                             None => res,
                         }
                     };
                     if let Some((first_parent, commit)) = res {
-                        chunk.push(Task {
+                        self.chunk.borrow_mut().push(Task {
                             parent_commit: first_parent,
                             commit,
                             compute_stats: true,
                         });
                     } else {
-                        chunk.push(Task {
+                        self.chunk.borrow_mut().push(Task {
                             parent_commit: None,
-                            commit: oid.to_owned(),
+                            commit: id.to_owned(),
                             compute_stats: false,
                         });
                     }
-                    if chunk.len() == CHUNK_SIZE {
-                        tx_tree_ids
-                            .send((chunk_id, std::mem::replace(&mut chunk, Vec::with_capacity(CHUNK_SIZE))))
+                    if self.chunk.borrow().len() == self.chunk_size {
+                        self.tx
+                            .send((
+                                *self.chunk_id.borrow(),
+                                std::mem::replace(&mut self.chunk.borrow_mut(), Vec::with_capacity(self.chunk_size)),
+                            ))
                             .ok();
-                        chunk_id += 1;
+                        *self.chunk_id.borrow_mut() += 1;
                     }
                 }
-                Ok(gix::objs::CommitRefIter::from_bytes(obj.data))
-            }),
-            || anyhow!("Cancelled by user"),
-        );
+                Ok(Some(obj))
+            }
+        }
+
+        let db = Db::new(&repo.objects, &traverse_progress, 50, tx_tree_ids, &known_commits);
+        let commit_iter = gix::interrupt::Iter::new(commit_id.ancestors(&db), || anyhow!("Cancelled by user"));
         let mut commits = Vec::new();
         for c in commit_iter {
             match c?.map(|c| c.id) {
@@ -354,15 +442,14 @@ pub fn update(
                         break;
                     }
                 }
-                Err(gix::traverse::commit::ancestors::Error::FindExisting { .. }) => {
+                Err(gix::traverse::commit::simple::Error::Find { .. }) => {
                     writeln!(err, "shallow repository - commit history is truncated").ok();
                     break;
                 }
                 Err(err) => return Err(err.into()),
             };
         }
-        tx_tree_ids.send((chunk_id, chunk)).ok();
-        drop(tx_tree_ids);
+        db.send_last_chunk();
         let saw_new_commits = !commits.is_empty();
         if saw_new_commits {
             traverse_progress.show_throughput(start);
@@ -388,7 +475,7 @@ pub fn update(
         if saw_new_commits {
             db_progress.show_throughput(start);
         } else {
-            db_progress.info("up to date");
+            db_progress.info("up to date".into());
         }
 
         commits.extend(all_commits);
@@ -426,7 +513,7 @@ fn remove_lines(out: &mut Vec<FileChange>, path: &BStr, lines_counter: &AtomicUs
             mode: FileMode::Removed,
             source_relpath: None,
             lines: Some(lines),
-        })
+        });
     }
 }
 

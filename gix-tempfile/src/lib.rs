@@ -9,8 +9,9 @@
 //!
 //! ### Initial Setup
 //!
-//! As no handlers for `TERMination` are installed, it is required to call [`signal::setup()`] before creating the first tempfile.
-//! This also allows to control how `git-tempfiles` integrates with other handlers under application control.
+//! As no handlers for `TERMination` are installed, it is required to call [`signal::setup()`] before creating
+//! the first tempfile. This also allows to control how this crate integrates with
+//! other handlers under application control.
 //!
 //! As a general rule of thumb, use `Default::default()` as argument to emulate the default behaviour and
 //! abort the process after cleaning temporary files. Read more about options in [`signal::handler::Mode`].
@@ -23,14 +24,14 @@
 //! * The application is performing a write operation on the tempfile when a signal arrives, preventing this tempfile to be removed,
 //!   but not others. Any other operation dealing with the tempfile suffers from the same issue.
 //!
-//! [signal-hook]: https://docs.rs/signal-hook
+//! [`signal-hook`]: https://docs.rs/signal-hook
 //!
 //! ## Feature Flags
 #![cfg_attr(
-    feature = "document-features",
-    cfg_attr(doc, doc = ::document_features::document_features!())
+    all(doc, feature = "document-features"),
+    doc = ::document_features::document_features!()
 )]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(all(doc, feature = "document-features"), feature(doc_cfg, doc_auto_cfg))]
 #![deny(missing_docs, rust_2018_idioms, unsafe_code)]
 
 use std::{
@@ -96,8 +97,8 @@ type HashMap<K, V> = hashmap::Concurrent<K, V>;
 
 pub use gix_fs::dir::{create as create_dir, remove as remove_dir};
 
-#[cfg(feature = "signals")]
 /// signal setup and reusable handlers.
+#[cfg(feature = "signals")]
 pub mod signal;
 
 mod forksafe;
@@ -206,6 +207,16 @@ pub fn writable_at(
     Handle::<Writable>::at(path, directory, cleanup)
 }
 
+/// Like [`writable_at`], but allows to set the given filesystem `permissions`.
+pub fn writable_at_with_permissions(
+    path: impl AsRef<Path>,
+    directory: ContainingDirectory,
+    cleanup: AutoRemove,
+    permissions: std::fs::Permissions,
+) -> io::Result<Handle<Writable>> {
+    Handle::<Writable>::at_with_permissions(path, directory, cleanup, permissions)
+}
+
 /// A shortcut to [`Handle::<Closed>::at()`] providing a closed temporary file to mark the presence of something.
 pub fn mark_at(
     path: impl AsRef<Path>,
@@ -213,4 +224,14 @@ pub fn mark_at(
     cleanup: AutoRemove,
 ) -> io::Result<Handle<Closed>> {
     Handle::<Closed>::at(path, directory, cleanup)
+}
+
+/// Like [`mark_at`], but allows to set the given filesystem `permissions`.
+pub fn mark_at_with_permissions(
+    path: impl AsRef<Path>,
+    directory: ContainingDirectory,
+    cleanup: AutoRemove,
+    permissions: std::fs::Permissions,
+) -> io::Result<Handle<Closed>> {
+    Handle::<Closed>::at_with_permissions(path, directory, cleanup, permissions)
 }

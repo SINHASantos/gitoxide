@@ -7,10 +7,9 @@ use std::{
     path::PathBuf,
 };
 
-use gix_odb::FindExt;
 pub use gix_submodule::*;
 
-use crate::{bstr::BStr, repository::IndexPersistedOrInMemory, Repository, Submodule};
+use crate::{bstr::BStr, is_dir_to_mode, worktree::IndexPersistedOrInMemory, Repository, Submodule};
 
 pub(crate) type ModulesFileStorage = gix_features::threading::OwnShared<gix_fs::SharedFileSnapshotMut<File>>;
 /// A lazily loaded and auto-updated worktree index.
@@ -24,7 +23,7 @@ pub use errors::*;
 
 /// A platform maintaining state needed to interact with submodules, created by [`Repository::submodules()].
 pub(crate) struct SharedState<'repo> {
-    pub(crate) repo: &'repo Repository,
+    pub repo: &'repo Repository,
     pub(crate) modules: ModulesSnapshot,
     is_active: RefCell<Option<IsActiveState>>,
     index: RefCell<Option<IndexPersistedOrInMemory>>,
@@ -61,11 +60,14 @@ impl<'repo> SharedState<'repo> {
                 .modules
                 .is_active_platform(&self.repo.config.resolved, self.repo.config.pathspec_defaults()?)?;
             let index = self.index()?;
-            let attributes = self.repo.attributes_only(
-                &index,
-                gix_worktree::stack::state::attributes::Source::WorktreeThenIdMapping
-                    .adjust_for_bare(self.repo.is_bare()),
-            )?;
+            let attributes = self
+                .repo
+                .attributes_only(
+                    &index,
+                    gix_worktree::stack::state::attributes::Source::WorktreeThenIdMapping
+                        .adjust_for_bare(self.repo.is_bare()),
+                )?
+                .detach();
             *state = Some(IsActiveState { platform, attributes });
         }
         Ok(RefMut::map_split(state, |opt| {
@@ -81,7 +83,7 @@ struct IsActiveState {
 }
 
 ///Access
-impl<'repo> Submodule<'repo> {
+impl Submodule<'_> {
     /// Return the submodule's name.
     pub fn name(&self) -> &BStr {
         self.name.as_ref()
@@ -94,16 +96,22 @@ impl<'repo> Submodule<'repo> {
     }
 
     /// Return the url from which to clone or update the submodule.
+    ///
+    /// This method takes into consideration submodule configuration overrides.
     pub fn url(&self) -> Result<gix_url::Url, config::url::Error> {
         self.state.modules.url(self.name())
     }
 
     /// Return the `update` field from this submodule's configuration, if present, or `None`.
+    ///
+    /// This method takes into consideration submodule configuration overrides.
     pub fn update(&self) -> Result<Option<config::Update>, config::update::Error> {
         self.state.modules.update(self.name())
     }
 
     /// Return the `branch` field from this submodule's configuration, if present, or `None`.
+    ///
+    /// This method takes into consideration submodule configuration overrides.
     pub fn branch(&self) -> Result<Option<config::Branch>, config::branch::Error> {
         self.state.modules.branch(self.name())
     }
@@ -117,13 +125,15 @@ impl<'repo> Submodule<'repo> {
                 .repo
                 .config
                 .resolved
-                .boolean_by_key("fetch.recurseSubmodules")
+                .boolean("fetch.recurseSubmodules")
                 .map(|res| crate::config::tree::Fetch::RECURSE_SUBMODULES.try_into_recurse_submodules(res))
                 .transpose()?,
         })
     }
 
     /// Return the `ignore` field from this submodule's configuration, if present, or `None`.
+    ///
+    /// This method takes into consideration submodule configuration overrides.
     pub fn ignore(&self) -> Result<Option<config::Ignore>, config::Error> {
         self.state.modules.ignore(self.name())
     }
@@ -140,21 +150,14 @@ impl<'repo> Submodule<'repo> {
     /// Please see the [plumbing crate documentation](gix_submodule::IsActivePlatform::is_active()) for details.
     pub fn is_active(&self) -> Result<bool, is_active::Error> {
         let (mut platform, mut attributes) = self.state.active_state_mut()?;
-        let is_active = platform.is_active(
-            &self.state.modules,
-            &self.state.repo.config.resolved,
-            self.name.as_ref(),
-            {
-                |relative_path, case, is_dir, out| {
-                    attributes
-                        .set_case(case)
-                        .at_entry(relative_path, Some(is_dir), |id, buf| {
-                            self.state.repo.objects.find_blob(id, buf)
-                        })
-                        .map_or(false, |platform| platform.matching_attributes(out))
-                }
-            },
-        )?;
+        let is_active = platform.is_active(&self.state.repo.config.resolved, self.name.as_ref(), {
+            &mut |relative_path, case, is_dir, out| {
+                attributes
+                    .set_case(case)
+                    .at_entry(relative_path, Some(is_dir_to_mode(is_dir)), &self.state.repo.objects)
+                    .is_ok_and(|platform| platform.matching_attributes(out))
+            }
+        })?;
         Ok(is_active)
     }
 
@@ -162,17 +165,21 @@ impl<'repo> Submodule<'repo> {
     /// or `None` if it was deleted from the index.
     ///
     /// If `None`, but `Some()` when calling [`Self::head_id()`], then the submodule was just deleted but the change
-    /// wasn't yet committed.
+    /// wasn't yet committed. Note that `None` is also returned if the entry at the submodule path isn't a submodule.
     /// If `Some()`, but `None` when calling [`Self::head_id()`], then the submodule was just added without having committed the change.
     pub fn index_id(&self) -> Result<Option<gix_hash::ObjectId>, index_id::Error> {
         let path = self.path()?;
-        Ok(self.state.index()?.entry_by_path(&path).map(|entry| entry.id))
+        Ok(self
+            .state
+            .index()?
+            .entry_by_path(&path)
+            .and_then(|entry| (entry.mode == gix_index::entry::Mode::COMMIT).then_some(entry.id)))
     }
 
     /// Return the object id of the submodule as stored in `HEAD^{tree}` of the superproject, or `None` if it wasn't yet committed.
     ///
     /// If `Some()`, but `None` when calling [`Self::index_id()`], then the submodule was just deleted but the change
-    /// wasn't yet committed.
+    /// wasn't yet committed. Note that `None` is also returned if the entry at the submodule path isn't a submodule.
     /// If `None`, but `Some()` when calling [`Self::index_id()`], then the submodule was just added without having committed the change.
     pub fn head_id(&self) -> Result<Option<gix_hash::ObjectId>, head_id::Error> {
         let path = self.path()?;
@@ -182,7 +189,7 @@ impl<'repo> Submodule<'repo> {
             .head_commit()?
             .tree()?
             .peel_to_entry_by_path(gix_path::from_bstr(path.as_ref()))?
-            .map(|entry| entry.inner.oid))
+            .and_then(|entry| (entry.mode().is_commit()).then_some(entry.inner.oid)))
     }
 
     /// Return the path at which the repository of the submodule should be located.
@@ -226,6 +233,7 @@ impl<'repo> Submodule<'repo> {
     }
 
     /// Query various parts of the submodule and assemble it into state information.
+    #[doc(alias = "status", alias = "git2")]
     pub fn state(&self) -> Result<State, config::path::Error> {
         let maybe_old_path = self.git_dir_try_old_form()?;
         let git_dir = self.git_dir();
@@ -266,6 +274,185 @@ impl<'repo> Submodule<'repo> {
         }
     }
 }
+
+///
+#[cfg(feature = "status")]
+pub mod status {
+    use super::{head_id, index_id, open, Status};
+    use crate::Submodule;
+    use gix_submodule::config;
+
+    /// The error returned by [Submodule::status()].
+    #[derive(Debug, thiserror::Error)]
+    #[allow(missing_docs)]
+    pub enum Error {
+        #[error(transparent)]
+        State(#[from] config::path::Error),
+        #[error(transparent)]
+        HeadId(#[from] head_id::Error),
+        #[error(transparent)]
+        IndexId(#[from] index_id::Error),
+        #[error(transparent)]
+        OpenRepository(#[from] open::Error),
+        #[error(transparent)]
+        IgnoreConfiguration(#[from] config::Error),
+        #[error(transparent)]
+        StatusPlatform(#[from] crate::status::Error),
+        #[error(transparent)]
+        StatusIter(#[from] crate::status::into_iter::Error),
+        #[error(transparent)]
+        NextStatusItem(#[from] crate::status::iter::Error),
+    }
+
+    impl Submodule<'_> {
+        /// Return the status of the submodule.
+        ///
+        /// Use `ignore` to control the portion of the submodule status to ignore. It can be obtained from
+        /// submodule configuration using the [`ignore()`](Submodule::ignore()) method.
+        /// If `check_dirty` is `true`, the computation will stop once the first in a ladder operations
+        /// ordered from cheap to expensive shows that the submodule is dirty.
+        /// Thus, submodules that are clean will still impose the complete set of computation, as given.
+        #[doc(alias = "submodule_status", alias = "git2")]
+        pub fn status(
+            &self,
+            ignore: config::Ignore,
+            check_dirty: bool,
+        ) -> Result<crate::submodule::status::types::Status, Error> {
+            self.status_opts(ignore, check_dirty, &mut |s| s)
+        }
+        /// Return the status of the submodule, just like [`status`](Self::status), but allows to adjust options
+        /// for more control over how the status is performed.
+        ///
+        /// If `check_dirty` is `true`, the computation will stop once the first in a ladder operations
+        /// ordered from cheap to expensive shows that the submodule is dirty. When checking for detailed
+        /// status information (i.e. untracked file, modifications, HEAD-index changes) only the first change
+        /// will be kept to stop as early as possible.
+        ///
+        /// Use `&mut std::convert::identity` for `adjust_options` if no specific options are desired.
+        /// A reason to change them might be to enable sorting to enjoy deterministic order of changes.
+        ///
+        /// The status allows to easily determine if a submodule [has changes](Status::is_dirty).
+        #[doc(alias = "submodule_status", alias = "git2")]
+        pub fn status_opts(
+            &self,
+            ignore: config::Ignore,
+            check_dirty: bool,
+            adjust_options: &mut dyn for<'a> FnMut(
+                crate::status::Platform<'a, gix_features::progress::Discard>,
+            )
+                -> crate::status::Platform<'a, gix_features::progress::Discard>,
+        ) -> Result<Status, Error> {
+            let mut state = self.state()?;
+            if ignore == config::Ignore::All {
+                return Ok(Status {
+                    state,
+                    ..Default::default()
+                });
+            }
+
+            let index_id = self.index_id()?;
+            if !state.repository_exists {
+                return Ok(Status {
+                    state,
+                    index_id,
+                    ..Default::default()
+                });
+            }
+            let sm_repo = match self.open()? {
+                None => {
+                    state.repository_exists = false;
+                    return Ok(Status {
+                        state,
+                        index_id,
+                        ..Default::default()
+                    });
+                }
+                Some(repo) => repo,
+            };
+
+            let checked_out_head_id = sm_repo.head_id().ok().map(crate::Id::detach);
+            let mut status = Status {
+                state,
+                index_id,
+                checked_out_head_id,
+                ..Default::default()
+            };
+            if ignore == config::Ignore::Dirty || check_dirty && status.is_dirty() == Some(true) {
+                return Ok(status);
+            }
+
+            if !state.worktree_checkout {
+                return Ok(status);
+            }
+            let statuses = adjust_options(sm_repo.status(gix_features::progress::Discard)?)
+                .index_worktree_options_mut(|opts| {
+                    if ignore == config::Ignore::Untracked {
+                        opts.dirwalk_options = None;
+                    }
+                })
+                .into_iter(None)?;
+            let mut changes = Vec::new();
+            for change in statuses {
+                changes.push(change?);
+                if check_dirty {
+                    break;
+                }
+            }
+            status.changes = Some(changes);
+            Ok(status)
+        }
+    }
+
+    impl Status {
+        /// Return `Some(true)` if the submodule status could be determined sufficiently and
+        /// if there are changes that would render this submodule dirty.
+        ///
+        /// Return `Some(false)` if the submodule status could be determined and it has no changes
+        /// at all.
+        ///
+        /// Return `None` if the repository clone or the worktree are missing entirely, which would leave
+        /// it to the caller to determine if that's considered dirty or not.
+        pub fn is_dirty(&self) -> Option<bool> {
+            if !self.state.worktree_checkout || !self.state.repository_exists {
+                return None;
+            }
+            let is_dirty =
+                self.checked_out_head_id != self.index_id || self.changes.as_ref().is_some_and(|c| !c.is_empty());
+            Some(is_dirty)
+        }
+    }
+
+    pub(super) mod types {
+        use crate::submodule::State;
+
+        /// A simplified status of the Submodule.
+        ///
+        /// As opposed to the similar-sounding [`State`], it is more exhaustive and potentially expensive to compute,
+        /// particularly for submodules without changes.
+        ///
+        /// It's produced by [Submodule::status()](crate::Submodule::status()).
+        #[derive(Default, Clone, PartialEq, Debug)]
+        pub struct Status {
+            /// The cheapest part of the status that is always performed, to learn if the repository is cloned
+            /// and if there is a worktree checkout.
+            pub state: State,
+            /// The commit at which the submodule is supposed to be according to the super-project's index.
+            /// `None` means the computation wasn't performed, or the submodule didn't exist in the super-project's index anymore.
+            pub index_id: Option<gix_hash::ObjectId>,
+            /// The commit-id of the `HEAD` at which the submodule is currently checked out.
+            /// `None` if the computation wasn't performed as it was skipped early, or if no repository was available or
+            /// if the HEAD could not be obtained or wasn't born.
+            pub checked_out_head_id: Option<gix_hash::ObjectId>,
+            /// The set of changes obtained from running something akin to `git status` in the submodule working tree.
+            ///
+            /// `None` if the computation wasn't performed as the computation was skipped early, or if no working tree was
+            /// available or repository was available.
+            pub changes: Option<Vec<crate::status::Item>>,
+        }
+    }
+}
+#[cfg(feature = "status")]
+pub use status::types::Status;
 
 /// A summary of the state of all parts forming a submodule, which allows to answer various questions about it.
 ///

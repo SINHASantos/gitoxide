@@ -1,7 +1,7 @@
 use std::sync::atomic::AtomicBool;
 
-use gix_features::progress::Progress;
-use gix_object::{bstr::ByteSlice, WriteTo};
+use gix_features::progress::{DynNestedProgress, Progress};
+use gix_object::WriteTo;
 
 use crate::index;
 
@@ -35,13 +35,11 @@ pub mod integrity {
     }
 
     /// Returned by [`index::File::verify_integrity()`][crate::index::File::verify_integrity()].
-    pub struct Outcome<P> {
+    pub struct Outcome {
         /// The computed checksum of the index which matched the stored one.
         pub actual_index_checksum: gix_hash::ObjectId,
         /// The packs traversal outcome, if one was provided
         pub pack_traverse_statistics: Option<crate::index::traverse::Statistics>,
-        /// The provided progress instance.
-        pub progress: P,
     }
 
     /// Additional options to define how the integrity should be verified.
@@ -123,7 +121,7 @@ impl index::File {
     ///
     /// It's a hash over all bytes of the index.
     pub fn index_checksum(&self) -> gix_hash::ObjectId {
-        gix_hash::ObjectId::from(&self.data[self.data.len() - self.hash_len..])
+        gix_hash::ObjectId::from_bytes_or_panic(&self.data[self.data.len() - self.hash_len..])
     }
 
     /// Returns the hash of the pack data file that this index file corresponds to.
@@ -131,14 +129,14 @@ impl index::File {
     /// It should [`crate::data::File::checksum()`] of the corresponding pack data file.
     pub fn pack_checksum(&self) -> gix_hash::ObjectId {
         let from = self.data.len() - self.hash_len * 2;
-        gix_hash::ObjectId::from(&self.data[from..][..self.hash_len])
+        gix_hash::ObjectId::from_bytes_or_panic(&self.data[from..][..self.hash_len])
     }
 
     /// Validate that our [`index_checksum()`][index::File::index_checksum()] matches the actual contents
     /// of this index file, and return it if it does.
     pub fn verify_checksum(
         &self,
-        progress: impl Progress,
+        progress: &mut dyn Progress,
         should_interrupt: &AtomicBool,
     ) -> Result<gix_hash::ObjectId, checksum::Error> {
         crate::verify::checksum_on_disk_or_mmap(
@@ -168,14 +166,13 @@ impl index::File {
     ///
     /// The given `progress` is inevitably consumed if there is an error, which is a tradeoff chosen to easily allow using `?` in the
     /// error case.
-    pub fn verify_integrity<P, C, F>(
+    pub fn verify_integrity<C, F>(
         &self,
         pack: Option<PackContext<'_, F>>,
-        mut progress: P,
+        progress: &mut dyn DynNestedProgress,
         should_interrupt: &AtomicBool,
-    ) -> Result<integrity::Outcome<P>, index::traverse::Error<index::verify::integrity::Error>>
+    ) -> Result<integrity::Outcome, index::traverse::Error<index::verify::integrity::Error>>
     where
-        P: Progress,
         C: crate::cache::DecodeEntry,
         F: Fn() -> C + Send + Clone,
     {
@@ -216,18 +213,17 @@ impl index::File {
                 .map(|o| integrity::Outcome {
                     actual_index_checksum: o.actual_index_checksum,
                     pack_traverse_statistics: Some(o.statistics),
-                    progress: o.progress,
                 }),
             None => self
                 .verify_checksum(
-                    progress.add_child_with_id("Sha1 of index", integrity::ProgressId::ChecksumBytes.into()),
+                    &mut progress
+                        .add_child_with_id("Sha1 of index".into(), integrity::ProgressId::ChecksumBytes.into()),
                     should_interrupt,
                 )
                 .map_err(Into::into)
                 .map(|id| integrity::Outcome {
                     actual_index_checksum: id,
                     pack_traverse_statistics: None,
-                    progress,
                 }),
         }
     }
@@ -239,7 +235,7 @@ impl index::File {
         object_kind: gix_object::Kind,
         buf: &[u8],
         index_entry: &index::Entry,
-        progress: &dyn gix_features::progress::RawProgress,
+        _progress: &dyn gix_features::progress::Progress,
     ) -> Result<(), integrity::Error> {
         if let Mode::HashCrc32Decode | Mode::HashCrc32DecodeEncode = verify_mode {
             use gix_object::Kind::*;
@@ -256,21 +252,12 @@ impl index::File {
                         encode_buf.clear();
                         object.write_to(&mut *encode_buf)?;
                         if encode_buf.as_slice() != buf {
-                            let mut should_return_error = true;
-                            if let Tree = object_kind {
-                                if buf.as_bstr().find(b"100664").is_some() || buf.as_bstr().find(b"100640").is_some() {
-                                    progress.info(format!("Tree object {} would be cleaned up during re-serialization, replacing mode '100664|100640' with '100644'", index_entry.oid));
-                                    should_return_error = false
-                                }
-                            }
-                            if should_return_error {
-                                return Err(integrity::Error::ObjectEncodeMismatch {
-                                    kind: object_kind,
-                                    id: index_entry.oid,
-                                    expected: buf.into(),
-                                    actual: encode_buf.clone().into(),
-                                });
-                            }
+                            return Err(integrity::Error::ObjectEncodeMismatch {
+                                kind: object_kind,
+                                id: index_entry.oid,
+                                expected: buf.into(),
+                                actual: encode_buf.clone().into(),
+                            });
                         }
                     }
                 }

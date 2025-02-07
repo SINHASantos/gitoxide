@@ -63,6 +63,10 @@ pub struct Options<'a> {
     /// that this is merely an optimization for those who discover a lot of repositories in the same process.
     ///
     /// If unset, the current working directory will be obtained automatically.
+    /// Note that the path here might or might not contained decomposed unicode, which may end up in a path
+    /// relevant us, like the git-dir or the worktree-dir. However, when opening the repository, it will
+    /// change decomposed unicode to precomposed unicode based on the value of `core.precomposeUnicode`, and we
+    /// don't have to deal with that value here just yet.
     pub current_dir: Option<&'a std::path::Path>,
 }
 
@@ -87,16 +91,12 @@ impl Options<'_> {
     ///
     /// Note that `GIT_DISCOVERY_ACROSS_FILESYSTEM` for `cross_fs` is **not** read,
     /// as it requires parsing of `git-config` style boolean values.
-    ///
-    /// In addition, this function disables `match_ceiling_dir_or_error` to allow
-    /// discovery if an outside environment variable sets non-matching ceiling directories.
     // TODO: test
     pub fn apply_environment(mut self) -> Self {
         let name = "GIT_CEILING_DIRECTORIES";
         if let Some(ceiling_dirs) = env::var_os(name) {
             self.ceiling_dirs = parse_ceiling_dirs(&ceiling_dirs);
         }
-        self.match_ceiling_dir_or_error = false;
         self
     }
 }

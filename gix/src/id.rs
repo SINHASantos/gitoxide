@@ -1,9 +1,10 @@
 //!
+#![allow(clippy::empty_docs)]
 use std::ops::Deref;
 
 use gix_hash::{oid, ObjectId};
 
-use crate::{object::find, revision, Id, Object};
+use crate::{object::find, Id, Object};
 
 /// An [object id][ObjectId] infused with a [`Repository`][crate::Repository].
 impl<'repo> Id<'repo> {
@@ -82,7 +83,7 @@ pub mod shorten {
     }
 }
 
-impl<'repo> Deref for Id<'repo> {
+impl Deref for Id<'_> {
     type Target = oid;
 
     fn deref(&self) -> &Self::Target {
@@ -103,9 +104,8 @@ impl<'repo> Id<'repo> {
 
 impl<'repo> Id<'repo> {
     /// Obtain a platform for traversing ancestors of this commit.
-    ///
-    pub fn ancestors(&self) -> revision::walk::Platform<'repo> {
-        revision::walk::Platform::new(Some(self.inner), self.repo)
+    pub fn ancestors(&self) -> crate::revision::walk::Platform<'repo> {
+        crate::revision::walk::Platform::new(Some(self.inner), self.repo)
     }
 }
 
@@ -118,9 +118,9 @@ mod impls {
 
     // Eq, Hash, Ord, PartialOrd,
 
-    impl<'a> std::hash::Hash for Id<'a> {
+    impl std::hash::Hash for Id<'_> {
         fn hash<H: Hasher>(&self, state: &mut H) {
-            self.inner.hash(state)
+            self.inner.hash(state);
         }
     }
 
@@ -136,7 +136,7 @@ mod impls {
         }
     }
 
-    impl<'repo> PartialEq<ObjectId> for Id<'repo> {
+    impl PartialEq<ObjectId> for Id<'_> {
         fn eq(&self, other: &ObjectId) -> bool {
             &self.inner == other
         }
@@ -148,7 +148,7 @@ mod impls {
         }
     }
 
-    impl<'repo> PartialEq<oid> for Id<'repo> {
+    impl PartialEq<oid> for Id<'_> {
         fn eq(&self, other: &oid) -> bool {
             self.inner == other
         }
@@ -160,25 +160,25 @@ mod impls {
         }
     }
 
-    impl<'repo> PartialEq<ObjectDetached> for Id<'repo> {
+    impl PartialEq<ObjectDetached> for Id<'_> {
         fn eq(&self, other: &ObjectDetached) -> bool {
             self.inner == other.id
         }
     }
 
-    impl<'repo> std::fmt::Debug for Id<'repo> {
+    impl std::fmt::Debug for Id<'_> {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             self.inner.fmt(f)
         }
     }
 
-    impl<'repo> std::fmt::Display for Id<'repo> {
+    impl std::fmt::Display for Id<'_> {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             self.inner.fmt(f)
         }
     }
 
-    impl<'repo> AsRef<oid> for Id<'repo> {
+    impl AsRef<oid> for Id<'_> {
         fn as_ref(&self) -> &oid {
             &self.inner
         }
@@ -202,6 +202,6 @@ mod tests {
         assert!(
             actual <= ceiling,
             "size of oid shouldn't change without notice: {actual} <= {ceiling}"
-        )
+        );
     }
 }

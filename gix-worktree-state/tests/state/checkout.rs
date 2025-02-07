@@ -8,8 +8,7 @@ use std::{
 };
 
 use gix_features::progress;
-use gix_object::bstr::ByteSlice;
-use gix_odb::FindExt;
+use gix_object::{bstr::ByteSlice, Data};
 use gix_testtools::tempfile::TempDir;
 use gix_worktree_state::checkout::Collision;
 use once_cell::sync::Lazy;
@@ -43,11 +42,16 @@ fn driver_exe() -> String {
     exe
 }
 
+fn assure_is_empty(dir: impl AsRef<Path>) -> std::io::Result<()> {
+    assert_eq!(std::fs::read_dir(dir)?.count(), 0);
+    Ok(())
+}
+
 #[test]
 fn submodules_are_instantiated_as_directories() -> crate::Result {
     let mut opts = opts_from_probe();
     opts.overwrite_existing = false;
-    let (_source_tree, destination, _index, _outcome) = checkout_index_in_tmp_dir(opts.clone(), "make_mixed")?;
+    let (_source_tree, destination, _index, _outcome) = checkout_index_in_tmp_dir(opts.clone(), "make_mixed", None)?;
 
     for path in ["m1", "modules/m1"] {
         let sm = destination.path().join(path);
@@ -58,18 +62,13 @@ fn submodules_are_instantiated_as_directories() -> crate::Result {
     Ok(())
 }
 
-fn assure_is_empty(dir: impl AsRef<Path>) -> std::io::Result<()> {
-    assert_eq!(std::fs::read_dir(dir)?.count(), 0);
-    Ok(())
-}
-
 #[test]
 fn accidental_writes_through_symlinks_are_prevented_if_overwriting_is_forbidden() {
     let mut opts = opts_from_probe();
     // without overwrite mode, everything is safe.
     opts.overwrite_existing = false;
     let (source_tree, destination, _index, outcome) =
-        checkout_index_in_tmp_dir(opts.clone(), "make_dangerous_symlink").unwrap();
+        checkout_index_in_tmp_dir(opts.clone(), "make_dangerous_symlink", None).unwrap();
 
     let source_files = dir_structure(&source_tree);
     let worktree_files = dir_structure(&destination);
@@ -110,7 +109,7 @@ fn writes_through_symlinks_are_prevented_even_if_overwriting_is_allowed() {
     // with overwrite mode
     opts.overwrite_existing = true;
     let (source_tree, destination, _index, outcome) =
-        checkout_index_in_tmp_dir(opts.clone(), "make_dangerous_symlink").unwrap();
+        checkout_index_in_tmp_dir(opts.clone(), "make_dangerous_symlink", None).unwrap();
 
     let source_files = dir_structure(&source_tree);
     let worktree_files = dir_structure(&destination);
@@ -126,7 +125,7 @@ fn writes_through_symlinks_are_prevented_even_if_overwriting_is_allowed() {
                 if cfg!(windows) { "A-dir\\a" } else { "A-dir/a" },
                 "A-file",
                 "FAKE-DIR",
-                if cfg!(windows) { "fake-file" } else { "FAKE-FILE" }
+                "FAKE-FILE"
             ]),
         );
         assert!(outcome.collisions.is_empty());
@@ -145,8 +144,13 @@ fn delayed_driver_process() -> crate::Result {
     opts.filter_process_delay = gix_filter::driver::apply::Delay::Allow;
     opts.destination_is_initially_empty = false;
     setup_filter_pipeline(opts.filters.options_mut());
-    let (_source, destination, _index, outcome) =
-        checkout_index_in_tmp_dir_opts(opts, "make_mixed_without_submodules_and_symlinks", |_| true, |_| Ok(()))?;
+    let (_source, destination, _index, outcome) = checkout_index_in_tmp_dir_opts(
+        opts,
+        "make_mixed_without_submodules_and_symlinks",
+        None,
+        |_| true,
+        |_| Ok(()),
+    )?;
     assert_eq!(outcome.collisions.len(), 0);
     assert_eq!(outcome.errors.len(), 0);
     assert_eq!(outcome.files_updated, 5);
@@ -169,16 +173,13 @@ fn delayed_driver_process() -> crate::Result {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "on windows, the symlink to a directory doesn't seem to work and we really want to test with symlinks"
-)]
 fn overwriting_files_and_lone_directories_works() -> crate::Result {
     for delay in [
         gix_filter::driver::apply::Delay::Allow,
         gix_filter::driver::apply::Delay::Forbid,
     ] {
         let mut opts = opts_from_probe();
+        assert!(opts.fs.symlink, "The probe must detect to be able to generate symlinks");
         opts.overwrite_existing = true;
         opts.filter_process_delay = delay;
         opts.destination_is_initially_empty = false;
@@ -186,11 +187,12 @@ fn overwriting_files_and_lone_directories_works() -> crate::Result {
         let (source, destination, _index, outcome) = checkout_index_in_tmp_dir_opts(
             opts.clone(),
             "make_mixed",
+            None,
             |_| true,
             |d| {
                 let empty = d.join("empty");
                 symlink::symlink_dir(d.join(".."), &empty)?; // empty is symlink to the directory above
-                std::fs::write(d.join("executable"), b"foo")?; // executable is regular file and has different content
+                std::fs::write(d.join("executable"), b"longer content foo bar")?; // executable is regular file and has different content
                 let dir = d.join("dir");
                 std::fs::create_dir(&dir)?;
                 std::fs::create_dir(dir.join("content"))?; // 'content' is a directory now
@@ -198,7 +200,7 @@ fn overwriting_files_and_lone_directories_works() -> crate::Result {
                 let dir = dir.join("sub-dir");
                 std::fs::create_dir(&dir)?;
 
-                symlink::symlink_dir(empty, dir.join("symlink"))?; // 'symlink' is a symlink to another file
+                symlink::symlink_dir(empty, dir.join("symlink"))?; // 'symlink' is a symlink to a directory.
                 Ok(())
             },
         )?;
@@ -218,9 +220,32 @@ fn overwriting_files_and_lone_directories_works() -> crate::Result {
 
         let meta = std::fs::symlink_metadata(exe)?;
         assert!(meta.is_file());
+        #[cfg(unix)]
         if opts.fs.executable_bit {
-            #[cfg(unix)]
-            assert_eq!(meta.mode() & 0o700, 0o700, "the executable bit is set where supported");
+            let mode = meta.mode();
+            assert_eq!(
+                mode & 0o100,
+                0o100,
+                "executable bit set where supported ({:04o} & {:04o} = {:04o} should be {:04o})",
+                mode,
+                0o100,
+                mode & 0o100,
+                0o100
+            );
+            let umask_write = gix_testtools::umask() & 0o222;
+            assert_eq!(
+                mode & umask_write,
+                0,
+                "no excessive write bits are set ({:04o} & {:04o} = {:04o} should be {:04o})",
+                mode,
+                umask_write,
+                mode & umask_write,
+                0
+            );
+            assert_ne!(
+                umask_write, 0,
+                "test not meaningful unless runner umask restricts some writes"
+            );
         }
 
         assert_eq!(
@@ -235,8 +260,7 @@ fn overwriting_files_and_lone_directories_works() -> crate::Result {
         );
 
         let symlink = destination.path().join("dir/sub-dir/symlink");
-        // on windows, git won't create symlinks as its probe won't detect the capability, even though we do.
-        assert_eq!(std::fs::symlink_metadata(&symlink)?.is_symlink(), cfg!(unix));
+        assert!(std::fs::symlink_metadata(&symlink)?.is_symlink());
         assert_eq!(
             std::fs::read(symlink)?.as_bstr(),
             "➡other content\r\n",
@@ -251,10 +275,70 @@ fn symlinks_become_files_if_disabled() -> crate::Result {
     let mut opts = opts_from_probe();
     opts.fs.symlink = false;
     let (source_tree, destination, _index, outcome) =
-        checkout_index_in_tmp_dir(opts.clone(), "make_mixed_without_submodules")?;
+        checkout_index_in_tmp_dir(opts.clone(), "make_mixed_without_submodules", None)?;
 
     assert_equality(&source_tree, &destination, opts.fs.symlink)?;
     assert!(outcome.collisions.is_empty());
+    Ok(())
+}
+
+#[test]
+fn symlinks_to_directories_are_usable() -> crate::Result {
+    let opts = opts_from_probe();
+    assert!(opts.fs.symlink, "The probe must detect to be able to generate symlinks");
+
+    let (_source_tree, destination, _index, outcome) =
+        checkout_index_in_tmp_dir(opts.clone(), "make_dir_symlink", None)?;
+    let worktree_files = dir_structure(&destination);
+    let worktree_files_stripped = stripped_prefix(&destination, &worktree_files);
+
+    assert_eq!(worktree_files_stripped, paths(["symlink"]));
+    let symlink_path = &worktree_files[0];
+    assert!(symlink_path
+        .symlink_metadata()
+        .expect("symlink is on disk")
+        .is_symlink());
+    assert!(symlink_path
+        .metadata()
+        .expect("metadata accessible through symlink")
+        .is_dir());
+    assert_eq!(std::fs::read_link(symlink_path)?, Path::new("."));
+    assert!(outcome.collisions.is_empty());
+    Ok(())
+}
+
+#[test]
+fn dangling_symlinks_can_be_created() -> crate::Result {
+    let opts = opts_from_probe();
+    assert!(opts.fs.symlink, "The probe must detect to be able to generate symlinks");
+
+    for (fixture, symlink_name, target_name) in [
+        ("make_dangling_symlink", "dangling", "non-existing-target"),
+        (
+            "make_dangling_symlink_to_windows_invalid",
+            "dangling-qmarks-symlink",
+            "???",
+        ),
+        (
+            "make_dangling_symlink_to_windows_reserved",
+            "dangling-con-symlink",
+            "CON",
+        ),
+    ] {
+        let (_source_tree, destination, _index, outcome) = checkout_index_in_tmp_dir(opts.clone(), fixture, None)?;
+        let worktree_files = dir_structure(&destination);
+        let worktree_files_stripped = stripped_prefix(&destination, &worktree_files);
+
+        assert_eq!(worktree_files_stripped, paths([symlink_name]));
+        let symlink_path = &worktree_files[0];
+        assert!(symlink_path
+            .symlink_metadata()
+            .expect("dangling symlink is on disk")
+            .is_symlink());
+        assert_eq!(std::fs::read_link(symlink_path)?, Path::new(target_name));
+        assert!(outcome.collisions.is_empty());
+    }
+
     Ok(())
 }
 
@@ -264,7 +348,7 @@ fn allow_or_disallow_symlinks() -> crate::Result {
     for allowed in &[false, true] {
         opts.fs.symlink = *allowed;
         let (source_tree, destination, _index, outcome) =
-            checkout_index_in_tmp_dir(opts.clone(), "make_mixed_without_submodules")?;
+            checkout_index_in_tmp_dir(opts.clone(), "make_mixed_without_submodules", None)?;
 
         assert_equality(&source_tree, &destination, opts.fs.symlink)?;
         assert!(outcome.collisions.is_empty());
@@ -280,13 +364,13 @@ fn keep_going_collects_results() {
     let (_source_tree, destination, _index, outcome) = checkout_index_in_tmp_dir_opts(
         opts,
         "make_mixed_without_submodules",
+        None,
         |_id| {
-            !matches!(
-                count.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            count
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
                     (current < 2).then_some(current + 1)
-                }),
-                Ok(_)
-            )
+                })
+                .is_err()
         },
         |_| Ok(()),
     )
@@ -297,7 +381,7 @@ fn keep_going_collects_results() {
             outcome.errors.len(),
             2,
             "content changes due to non-deterministic nature of racy threads"
-        )
+        );
     } else {
         assert_eq!(
             outcome
@@ -305,12 +389,7 @@ fn keep_going_collects_results() {
                 .iter()
                 .map(|r| r.path.to_path_lossy().into_owned())
                 .collect::<Vec<_>>(),
-            paths(if cfg!(unix) {
-                [".gitattributes", "dir/content"]
-            } else {
-                // not actually a symlink anymore, even though symlinks are supported but git think differently.
-                ["dir/content", "dir/sub-dir/symlink"]
-            })
+            paths([".gitattributes", "dir/content"])
         );
     }
 
@@ -324,11 +403,15 @@ fn keep_going_collects_results() {
     } else {
         assert_eq!(
             stripped_prefix(&destination, &dir_structure(&destination)),
-            paths(if cfg!(unix) {
-                Box::new(["dir/sub-dir/symlink", "empty", "executable"].into_iter()) as Box<dyn Iterator<Item = &str>>
-            } else {
-                Box::new(["empty", "executable"].into_iter())
-            }),
+            paths([
+                if cfg!(unix) {
+                    "dir/sub-dir/symlink"
+                } else {
+                    "dir\\sub-dir\\symlink"
+                },
+                "empty",
+                "executable",
+            ]),
             "some files could not be created"
         );
     }
@@ -344,7 +427,7 @@ fn no_case_related_collisions_on_case_sensitive_filesystem() {
         return;
     }
     let (source_tree, destination, index, outcome) =
-        checkout_index_in_tmp_dir(opts.clone(), "make_ignorecase_collisions").unwrap();
+        checkout_index_in_tmp_dir(opts.clone(), "make_ignorecase_collisions", None).unwrap();
 
     assert!(outcome.collisions.is_empty());
     let num_files = assert_equality(&source_tree, &destination, opts.fs.symlink).unwrap();
@@ -360,6 +443,48 @@ fn no_case_related_collisions_on_case_sensitive_filesystem() {
 }
 
 #[test]
+fn safety_checks_dotdot_trees() {
+    let mut opts = opts_from_probe();
+    let err =
+        checkout_index_in_tmp_dir(opts.clone(), "make_traverse_trees", Some("traverse_dotdot_trees")).unwrap_err();
+    let expected_err_msg = "Input path \"../outside\" contains relative or absolute components";
+    assert_eq!(err.source().expect("inner").to_string(), expected_err_msg);
+
+    opts.keep_going = true;
+    let (_source_tree, _destination, _index, outcome) =
+        checkout_index_in_tmp_dir(opts, "make_traverse_trees", Some("traverse_dotdot_trees"))
+            .expect("keep-going checks out as much as possible");
+    assert_eq!(outcome.errors.len(), 1, "one path could not be checked out");
+    assert_eq!(
+        outcome.errors[0].error.source().expect("inner").to_string(),
+        expected_err_msg
+    );
+}
+
+#[test]
+fn safety_checks_dotgit_trees() {
+    let opts = opts_from_probe();
+    let err =
+        checkout_index_in_tmp_dir(opts.clone(), "make_traverse_trees", Some("traverse_dotgit_trees")).unwrap_err();
+    assert_eq!(
+        err.source().expect("inner").to_string(),
+        "The .git name may never be used"
+    );
+}
+
+#[test]
+fn safety_checks_dotgit_ntfs_stream() {
+    let opts = opts_from_probe();
+    let err =
+        checkout_index_in_tmp_dir(opts.clone(), "make_traverse_trees", Some("traverse_dotgit_stream")).unwrap_err();
+    assert_eq!(
+        err.source().expect("inner").to_string(),
+        "The .git name may never be used",
+        "note how it is still discovered even though the path is `.git::$INDEX_ALLOCATION`"
+    );
+}
+
+#[test]
 fn collisions_are_detected_on_a_case_insensitive_filesystem_even_with_delayed_filters() {
     let mut opts = opts_from_probe();
     if !opts.fs.ignore_case {
@@ -369,7 +494,7 @@ fn collisions_are_detected_on_a_case_insensitive_filesystem_even_with_delayed_fi
     setup_filter_pipeline(opts.filters.options_mut());
     opts.filter_process_delay = gix_filter::driver::apply::Delay::Allow;
     let (source_tree, destination, _index, outcome) =
-        checkout_index_in_tmp_dir(opts, "make_ignorecase_collisions").unwrap();
+        checkout_index_in_tmp_dir(opts, "make_ignorecase_collisions", None).unwrap();
 
     let source_files = dir_structure(&source_tree);
     assert_eq!(
@@ -481,35 +606,66 @@ pub fn dir_structure<P: AsRef<std::path::Path>>(path: P) -> Vec<std::path::PathB
 fn checkout_index_in_tmp_dir(
     opts: gix_worktree_state::checkout::Options,
     name: &str,
+    subdir_name: Option<&str>,
 ) -> crate::Result<(PathBuf, TempDir, gix_index::File, gix_worktree_state::checkout::Outcome)> {
-    checkout_index_in_tmp_dir_opts(opts, name, |_d| true, |_| Ok(()))
+    checkout_index_in_tmp_dir_opts(opts, name, subdir_name, |_d| true, |_| Ok(()))
 }
 
 fn checkout_index_in_tmp_dir_opts(
     opts: gix_worktree_state::checkout::Options,
-    name: &str,
-    mut allow_return_object: impl FnMut(&gix_hash::oid) -> bool + Send + Clone,
+    script_name: &str,
+    subdir_name: Option<&str>,
+    allow_return_object: impl FnMut(&gix_hash::oid) -> bool + Send + Clone,
     prep_dest: impl Fn(&Path) -> std::io::Result<()>,
 ) -> crate::Result<(PathBuf, TempDir, gix_index::File, gix_worktree_state::checkout::Outcome)> {
-    let source_tree = fixture_path(name);
+    let source_tree = {
+        let root = fixture_path(script_name);
+        if let Some(name) = subdir_name {
+            root.join(name)
+        } else {
+            root
+        }
+    };
     let git_dir = source_tree.join(".git");
-    let mut index = gix_index::File::at(git_dir.join("index"), gix_hash::Kind::Sha1, Default::default())?;
+    let mut index = gix_index::File::at(git_dir.join("index"), gix_hash::Kind::Sha1, false, Default::default())?;
     let odb = gix_odb::at(git_dir.join("objects"))?.into_inner().into_arc()?;
     let destination = gix_testtools::tempfile::tempdir_in(std::env::current_dir()?)?;
     prep_dest(destination.path()).expect("preparation must succeed");
 
+    #[derive(Clone)]
+    struct MaybeFind<Allow: Clone, Find: Clone> {
+        allow: std::cell::RefCell<Allow>,
+        objects: Find,
+    }
+
+    impl<Allow, Find> gix_object::Find for MaybeFind<Allow, Find>
+    where
+        Allow: FnMut(&gix_hash::oid) -> bool + Send + Clone,
+        Find: gix_object::Find + Send + Clone,
+    {
+        fn try_find<'a>(
+            &self,
+            id: &gix_hash::oid,
+            buf: &'a mut Vec<u8>,
+        ) -> Result<Option<Data<'a>>, gix_object::find::Error> {
+            if (self.allow.borrow_mut())(id) {
+                self.objects.try_find(id, buf)
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    let db = MaybeFind {
+        allow: allow_return_object.into(),
+        objects: odb,
+    };
     let outcome = gix_worktree_state::checkout(
         &mut index,
         destination.path(),
-        move |oid, buf| {
-            if allow_return_object(oid) {
-                odb.find_blob(oid, buf)
-            } else {
-                Err(gix_odb::find::existing_object::Error::NotFound { oid: oid.to_owned() })
-            }
-        },
-        &mut progress::Discard,
-        &mut progress::Discard,
+        db,
+        &progress::Discard,
+        &progress::Discard,
         &AtomicBool::default(),
         opts,
     )?;
@@ -522,7 +678,7 @@ fn stripped_prefix(prefix: impl AsRef<Path>, source_files: &[PathBuf]) -> Vec<&P
 
 fn probe_gitoxide_dir() -> crate::Result<gix_fs::Capabilities> {
     Ok(gix_fs::Capabilities::probe(
-        gix_discover::upwards(".")?
+        &gix_discover::upwards(".".as_ref())?
             .0
             .into_repository_and_work_tree_directories()
             .0,
@@ -530,8 +686,10 @@ fn probe_gitoxide_dir() -> crate::Result<gix_fs::Capabilities> {
 }
 
 fn opts_from_probe() -> gix_worktree_state::checkout::Options {
+    static CAPABILITIES: Lazy<gix_fs::Capabilities> = Lazy::new(|| probe_gitoxide_dir().unwrap());
+
     gix_worktree_state::checkout::Options {
-        fs: probe_gitoxide_dir().unwrap(),
+        fs: *CAPABILITIES,
         destination_is_initially_empty: true,
         thread_limit: gix_features::parallel::num_threads(None).into(),
         ..Default::default()

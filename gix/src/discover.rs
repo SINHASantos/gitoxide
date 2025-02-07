@@ -37,11 +37,12 @@ impl ThreadSafeRepository {
         trust_map: gix_sec::trust::Mapping<crate::open::Options>,
     ) -> Result<Self, Error> {
         let _span = gix_trace::coarse!("ThreadSafeRepository::discover()");
-        let (path, trust) = upwards_opts(directory, options)?;
+        let (path, trust) = upwards_opts(directory.as_ref(), options)?;
         let (git_dir, worktree_dir) = path.into_repository_and_work_tree_directories();
         let mut options = trust_map.into_value_by_level(trust);
         options.git_dir_trust = trust.into();
-        options.current_dir = Some(std::env::current_dir().map_err(upwards::Error::CurrentDir)?);
+        // Note that we will adjust the `current_dir` later so it matches the value of `core.precomposeUnicode`.
+        options.current_dir = Some(gix_fs::current_dir(false).map_err(upwards::Error::CurrentDir)?);
         Self::open_from_paths(git_dir, worktree_dir, options).map_err(Into::into)
     }
 
@@ -61,6 +62,12 @@ impl ThreadSafeRepository {
     ///
     /// Finally, use the `trust_map` to determine which of our own repository options to use
     /// based on the trust level of the effective repository directory.
+    ///
+    /// ### Note
+    ///
+    /// Consider to set [`match_ceiling_dir_or_error = false`](gix_discover::upwards::Options::match_ceiling_dir_or_error)
+    /// to allow discovery if an outside environment variable sets non-matching ceiling directories for greater
+    /// compatibility with Git.
     pub fn discover_with_environment_overrides_opts(
         directory: impl AsRef<Path>,
         mut options: upwards::Options<'_>,

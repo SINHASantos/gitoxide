@@ -1,5 +1,5 @@
 #![allow(missing_docs)]
-use std::{borrow::Cow, convert::TryFrom, fmt::Display, str::FromStr};
+use std::{borrow::Cow, fmt::Display, str::FromStr};
 
 use bstr::{BStr, BString};
 
@@ -18,7 +18,7 @@ impl Display for Color {
                 write!(f, " ")?;
             }
             bg.fmt(f)?;
-            write_space = Some(())
+            write_space = Some(());
         }
 
         if !self.attributes.is_empty() {
@@ -204,7 +204,7 @@ impl FromStr for Name {
         }
 
         if let Some(s) = s.strip_prefix('#') {
-            if s.len() == 6 {
+            if s.len() == 6 && s.is_char_boundary(2) && s.is_char_boundary(4) && s.is_char_boundary(6) {
                 let rgb = (
                     u8::from_str_radix(&s[..2], 16),
                     u8::from_str_radix(&s[2..4], 16),
@@ -267,7 +267,7 @@ impl Display for Attribute {
             };
             if self.contains(attr) {
                 if write_space.take().is_some() {
-                    write!(f, " ")?
+                    write!(f, " ")?;
                 }
                 match attr {
                     Attribute::RESET => write!(f, "reset"),

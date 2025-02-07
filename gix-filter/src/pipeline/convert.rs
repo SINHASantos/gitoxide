@@ -21,6 +21,9 @@ pub mod configuration {
 
 ///
 pub mod to_git {
+    /// A function that fills `buf` `fn(&mut buf)` with the data stored in the index of the file that should be converted.
+    pub type IndexObjectFn<'a> = dyn FnMut(&mut Vec<u8>) -> Result<Option<()>, gix_object::find::Error> + 'a;
+
     /// The error returned by [Pipeline::convert_to_git()][super::Pipeline::convert_to_git()].
     #[derive(Debug, thiserror::Error)]
     #[allow(missing_docs)]
@@ -35,6 +38,8 @@ pub mod to_git {
         Configuration(#[from] super::configuration::Error),
         #[error("Copy of driver process output to memory failed")]
         ReadProcessOutputToBuffer(#[from] std::io::Error),
+        #[error("Could not allocate buffer")]
+        OutOfMemory(#[from] std::collections::TryReserveError),
     }
 }
 
@@ -50,6 +55,8 @@ pub mod to_worktree {
         Driver(#[from] crate::driver::apply::Error),
         #[error(transparent)]
         Configuration(#[from] super::configuration::Error),
+        #[error("Could not allocate buffer")]
+        OutOfMemory(#[from] std::collections::TryReserveError),
     }
 }
 
@@ -59,18 +66,17 @@ impl Pipeline {
     /// based on the `attributes` at `rela_path` which is passed as first argument..
     /// When converting to `crlf`, and depending on the configuration, `index_object` might be called to obtain the index
     /// version of `src` if available. It can return `Ok(None)` if this information isn't available.
-    pub fn convert_to_git<E, R>(
+    pub fn convert_to_git<R>(
         &mut self,
         mut src: R,
         rela_path: &Path,
-        attributes: impl FnOnce(&BStr, &mut gix_attributes::search::Outcome),
-        index_object: impl FnOnce(&BStr, &mut Vec<u8>) -> Result<Option<()>, E>,
+        attributes: &mut dyn FnMut(&BStr, &mut gix_attributes::search::Outcome),
+        index_object: &mut to_git::IndexObjectFn<'_>,
     ) -> Result<ToGitOutcome<'_, R>, to_git::Error>
     where
         R: std::io::Read,
-        E: std::error::Error + Send + Sync + 'static,
     {
-        let bstr_path = gix_path::into_bstr(rela_path);
+        let bstr_rela_path = gix_path::to_unix_separators_on_windows(gix_path::into_bstr(rela_path));
         let Configuration {
             driver,
             digest,
@@ -78,20 +84,20 @@ impl Pipeline {
             encoding,
             apply_ident_filter,
         } = Configuration::at_path(
-            bstr_path.as_ref(),
+            bstr_rela_path.as_ref(),
             &self.options.drivers,
             &mut self.attrs,
             attributes,
             self.options.eol_config,
         )?;
 
-        let mut changed = false;
+        let mut in_src_buffer = false;
         // this is just an approximation, but it's as good as it gets without reading the actual input.
         let would_convert_eol = eol::convert_to_git(
             b"\r\n",
             digest,
             &mut self.bufs.dest,
-            |_| Ok::<_, E>(None),
+            &mut |_| Ok(None),
             eol::convert_to_git::Options {
                 round_trip_check: None,
                 config: self.options.eol_config,
@@ -103,7 +109,7 @@ impl Pipeline {
                 driver,
                 &mut src,
                 driver::Operation::Clean,
-                self.context.with_path(bstr_path.as_ref()),
+                self.context.with_path(bstr_rela_path.as_ref()),
             )? {
                 if !apply_ident_filter && encoding.is_none() && !would_convert_eol {
                     // Note that this is not typically a benefit in terms of saving memory as most filters
@@ -113,12 +119,13 @@ impl Pipeline {
                 }
                 self.bufs.clear();
                 read.read_to_end(&mut self.bufs.src)?;
-                changed = true;
+                in_src_buffer = true;
             }
         }
-        if !changed && (apply_ident_filter || encoding.is_some() || would_convert_eol) {
+        if !in_src_buffer && (apply_ident_filter || encoding.is_some() || would_convert_eol) {
             self.bufs.clear();
             src.read_to_end(&mut self.bufs.src)?;
+            in_src_buffer = true;
         }
 
         if let Some(encoding) = encoding {
@@ -133,28 +140,25 @@ impl Pipeline {
                 },
             )?;
             self.bufs.swap();
-            changed = true;
         }
 
         if eol::convert_to_git(
             &self.bufs.src,
             digest,
             &mut self.bufs.dest,
-            |buf| index_object(bstr_path.as_ref(), buf),
+            &mut |buf| index_object(buf),
             eol::convert_to_git::Options {
                 round_trip_check: self.options.crlf_roundtrip_check.to_eol_roundtrip_check(rela_path),
                 config: self.options.eol_config,
             },
         )? {
             self.bufs.swap();
-            changed = true;
         }
 
-        if apply_ident_filter && ident::undo(&self.bufs.src, &mut self.bufs.dest) {
+        if apply_ident_filter && ident::undo(&self.bufs.src, &mut self.bufs.dest)? {
             self.bufs.swap();
-            changed = true;
         }
-        Ok(if changed {
+        Ok(if in_src_buffer {
             ToGitOutcome::Buffer(&self.bufs.src)
         } else {
             ToGitOutcome::Unchanged(src)
@@ -172,7 +176,7 @@ impl Pipeline {
         &mut self,
         src: &'input [u8],
         rela_path: &BStr,
-        attributes: impl FnOnce(&BStr, &mut gix_attributes::search::Outcome),
+        attributes: &mut dyn FnMut(&BStr, &mut gix_attributes::search::Outcome),
         can_delay: driver::apply::Delay,
     ) -> Result<ToWorktreeOutcome<'input, '_>, to_worktree::Error> {
         let Configuration {
@@ -189,14 +193,14 @@ impl Pipeline {
             self.options.eol_config,
         )?;
 
-        let mut bufs = self.bufs.with_src(src);
+        let mut bufs = self.bufs.use_foreign_src(src);
         let (src, dest) = bufs.src_and_dest();
-        if apply_ident_filter && ident::apply(src, self.options.object_hash, dest) {
+        if apply_ident_filter && ident::apply(src, self.options.object_hash, dest)? {
             bufs.swap();
         }
 
         let (src, dest) = bufs.src_and_dest();
-        if eol::convert_to_worktree(src, digest, dest, self.options.eol_config) {
+        if eol::convert_to_worktree(src, digest, dest, self.options.eol_config)? {
             bufs.swap();
         };
 
@@ -242,7 +246,7 @@ pub enum ToGitOutcome<'pipeline, R> {
 ///
 /// ### Panics
 ///
-/// If `std::io::Read` is used on it and the output is delayed, a panic will occour. The caller is responsible for either disallowing delayed
+/// If `std::io::Read` is used on it and the output is delayed, a panic will occur. The caller is responsible for either disallowing delayed
 /// results or if allowed, handle them. Use [`is_delayed()][Self::is_delayed()].
 pub enum ToWorktreeOutcome<'input, 'pipeline> {
     /// The original input wasn't changed and the original buffer is present
@@ -256,8 +260,8 @@ pub enum ToWorktreeOutcome<'input, 'pipeline> {
     Process(driver::apply::MaybeDelayed<'pipeline>),
 }
 
-impl<'input, 'pipeline> ToWorktreeOutcome<'input, 'pipeline> {
-    /// Return true if this outcome is delayed. In that case, one isn't allowed to use [`Read`][std::io::Read] or cause a panic.
+impl ToWorktreeOutcome<'_, '_> {
+    /// Return true if this outcome is delayed. In that case, one isn't allowed to use [`Read`] or cause a panic.
     pub fn is_delayed(&self) -> bool {
         matches!(
             self,
@@ -293,7 +297,7 @@ impl<'input, 'pipeline> ToWorktreeOutcome<'input, 'pipeline> {
     }
 }
 
-impl<'input, 'pipeline> std::io::Read for ToWorktreeOutcome<'input, 'pipeline> {
+impl std::io::Read for ToWorktreeOutcome<'_, '_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             ToWorktreeOutcome::Unchanged(b) => b.read(buf),
@@ -306,7 +310,7 @@ impl<'input, 'pipeline> std::io::Read for ToWorktreeOutcome<'input, 'pipeline> {
     }
 }
 
-impl<'pipeline, R> std::io::Read for ToGitOutcome<'pipeline, R>
+impl<R> std::io::Read for ToGitOutcome<'_, R>
 where
     R: std::io::Read,
 {
@@ -314,17 +318,17 @@ where
         match self {
             ToGitOutcome::Unchanged(r) => r.read(buf),
             ToGitOutcome::Process(r) => r.read(buf),
-            ToGitOutcome::Buffer(mut r) => r.read(buf),
+            ToGitOutcome::Buffer(r) => r.read(buf),
         }
     }
 }
 
-impl<R> ToGitOutcome<'_, R>
+impl<'a, R> ToGitOutcome<'a, R>
 where
     R: std::io::Read,
 {
     /// If we contain a buffer, and not a stream, return it.
-    pub fn as_bytes(&self) -> Option<&[u8]> {
+    pub fn as_bytes(&self) -> Option<&'a [u8]> {
         match self {
             ToGitOutcome::Unchanged(_) | ToGitOutcome::Process(_) => None,
             ToGitOutcome::Buffer(b) => Some(b),

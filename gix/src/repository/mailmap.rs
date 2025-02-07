@@ -1,3 +1,6 @@
+use crate::config::tree::Mailmap;
+use crate::Id;
+
 impl crate::Repository {
     // TODO: tests
     /// Similar to [`open_mailmap_into()`][crate::Repository::open_mailmap_into()], but ignores all errors and returns at worst
@@ -24,17 +27,12 @@ impl crate::Repository {
     pub fn open_mailmap_into(&self, target: &mut gix_mailmap::Snapshot) -> Result<(), crate::mailmap::load::Error> {
         let mut err = None::<crate::mailmap::load::Error>;
         let mut buf = Vec::new();
-        let mut blob_id = self
-            .config
-            .resolved
-            .raw_value("mailmap", None, "blob")
-            .ok()
-            .and_then(|spec| {
-                // TODO: actually resolve this as spec (once we can do that)
-                gix_hash::ObjectId::from_hex(spec.as_ref())
-                    .map_err(|e| err.get_or_insert(e.into()))
-                    .ok()
-            });
+        let mut blob_id = self.config.resolved.string(Mailmap::BLOB).and_then(|spec| {
+            self.rev_parse_single(spec.as_ref())
+                .map_err(|e| err.get_or_insert(e.into()))
+                .map(Id::detach)
+                .ok()
+        });
         match self.work_dir() {
             None => {
                 blob_id = blob_id.or_else(|| {
@@ -69,29 +67,9 @@ impl crate::Repository {
         }
 
         let configured_path = self
-            .config
-            .resolved
-            .value::<gix_config::Path<'_>>("mailmap", None, "file")
-            .ok()
-            .and_then(|path| {
-                let install_dir = self.install_dir().ok()?;
-                let home = self.config.home_dir();
-                match path.interpolate(gix_config::path::interpolate::Context {
-                    git_install_dir: Some(install_dir.as_path()),
-                    home_dir: home.as_deref(),
-                    home_for_user: if self.options.git_dir_trust.expect("trust is set") == gix_sec::Trust::Full {
-                        Some(gix_config::path::interpolate::home_for_user)
-                    } else {
-                        None
-                    },
-                }) {
-                    Ok(path) => Some(path),
-                    Err(e) => {
-                        err.get_or_insert(e.into());
-                        None
-                    }
-                }
-            });
+            .config_snapshot()
+            .trusted_path(&Mailmap::FILE)
+            .and_then(|res| res.map_err(|e| err.get_or_insert(e.into())).ok());
 
         if let Some(mut file) =
             configured_path.and_then(|path| std::fs::File::open(path).map_err(|e| err.get_or_insert(e.into())).ok())

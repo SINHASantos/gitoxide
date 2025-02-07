@@ -1,4 +1,4 @@
-use crate::{bstr::BString, object, reference};
+use crate::{bstr::BString, object, reference, remote};
 
 /// A hint to know what to do if refs and object names are equal.
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
@@ -55,12 +55,28 @@ pub struct Options {
 #[derive(Debug, thiserror::Error)]
 #[allow(missing_docs)]
 pub enum Error {
+    #[error("Could not peel '{}' to obtain its target", name)]
+    PeelToId {
+        name: gix_ref::FullName,
+        source: reference::peel::Error,
+    },
     #[error("The rev-spec is malformed and misses a ref name")]
     Malformed,
     #[error("Unborn heads do not have a reflog yet")]
     UnbornHeadsHaveNoRefLog,
-    #[error("This feature will be implemented once {dependency}")]
-    Planned { dependency: &'static str },
+    #[error("Unborn heads cannot have push or upstream tracking branches")]
+    UnbornHeadForSibling,
+    #[error("Branch named {name} does not have a {} tracking branch configured", direction.as_str())]
+    NoTrackingBranch {
+        name: gix_ref::FullName,
+        direction: remote::Direction,
+    },
+    #[error("Error when obtaining {} tracking branch for {name}", direction.as_str())]
+    GetTrackingBranch {
+        name: gix_ref::FullName,
+        direction: remote::Direction,
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
     #[error("Reference {reference:?} does not have a reference log, cannot {action}")]
     MissingRefLog { reference: BString, action: &'static str },
     #[error("HEAD has {available} prior checkouts and checkout number {desired} is out of range")]
@@ -85,7 +101,7 @@ pub enum Error {
         desired: usize,
         available: usize,
     },
-    #[error("Path {desired_path:?} did not exist in index at stage {desired_stage}{}{}", stage_hint.map(|actual|format!(". It does exist at stage {actual}")).unwrap_or_default(), exists.then(|| ". It exists on disk").unwrap_or(". It does not exist on disk"))]
+    #[error("Path {desired_path:?} did not exist in index at stage {}{}{}", *desired_stage as u8, stage_hint.map(|actual|format!(". It does exist at stage {}", actual as u8)).unwrap_or_default(), exists.then(|| ". It exists on disk").unwrap_or(". It does not exist on disk"))]
     IndexLookup {
         desired_path: BString,
         desired_stage: gix_index::entry::Stage,
@@ -100,15 +116,15 @@ pub enum Error {
     RevWalkIterInit(#[from] crate::reference::iter::init::Error),
     #[error(transparent)]
     RevWalkAllReferences(#[from] gix_ref::packed::buffer::open::Error),
-    #[cfg(feature = "regex")]
+    #[cfg(feature = "revparse-regex")]
     #[error(transparent)]
     InvalidRegex(#[from] regex::Error),
     #[cfg_attr(
-        feature = "regex",
+        feature = "revparse-regex",
         error("None of {commits_searched} commits from {oid} matched regex {regex:?}")
     )]
     #[cfg_attr(
-        not(feature = "regex"),
+        not(feature = "revparse-regex"),
         error("None of {commits_searched} commits from {oid} matched text {regex:?}")
     )]
     NoRegexMatch {
@@ -117,11 +133,11 @@ pub enum Error {
         commits_searched: usize,
     },
     #[cfg_attr(
-        feature = "regex",
+        feature = "revparse-regex",
         error("None of {commits_searched} commits reached from all references matched regex {regex:?}")
     )]
     #[cfg_attr(
-        not(feature = "regex"),
+        not(feature = "revparse-regex"),
         error("None of {commits_searched} commits reached from all references matched text {regex:?}")
     )]
     NoRegexMatchAllRefs { regex: BString, commits_searched: usize },
@@ -171,9 +187,11 @@ pub enum Error {
         next: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
     },
     #[error(transparent)]
-    Traverse(#[from] gix_traverse::commit::ancestors::Error),
+    Traverse(#[from] crate::revision::walk::iter::Error),
     #[error(transparent)]
     Walk(#[from] crate::revision::walk::Error),
     #[error("Spec does not contain a single object id")]
     SingleNotFound,
+    #[error("Reflog does not contain any entries")]
+    EmptyReflog,
 }

@@ -1,18 +1,17 @@
-use std::{borrow::Cow, io};
-
 use anyhow::bail;
 use gix::Tree;
+use std::io::BufWriter;
+use std::{borrow::Cow, io};
 
 use crate::OutputFormat;
 
 mod entries {
-    use std::collections::VecDeque;
-
     use gix::{
         bstr::{BStr, BString, ByteSlice, ByteVec},
         objs::tree::EntryRef,
         traverse::tree::visit::Action,
     };
+    use std::collections::VecDeque;
 
     use crate::repository::tree::format_entry;
 
@@ -58,6 +57,9 @@ mod entries {
         }
 
         fn push_element(&mut self, name: &BStr) {
+            if name.is_empty() {
+                return;
+            }
             if !self.path.is_empty() {
                 self.path.push(b'/');
             }
@@ -65,7 +67,11 @@ mod entries {
         }
     }
 
-    impl<'repo, 'a> gix::traverse::tree::Visit for Traverse<'repo, 'a> {
+    impl gix::traverse::tree::Visit for Traverse<'_, '_> {
+        fn pop_back_tracked_path_and_set_current(&mut self) {
+            self.path = self.path_deque.pop_back().unwrap_or_default();
+        }
+
         fn pop_front_tracked_path_and_set_current(&mut self) {
             self.path = self.path_deque.pop_front().expect("every parent is set only once");
         }
@@ -80,7 +86,7 @@ mod entries {
         }
 
         fn pop_path_component(&mut self) {
-            self.pop_element()
+            self.pop_element();
         }
 
         fn visit_tree(&mut self, _entry: &EntryRef<'_>) -> Action {
@@ -89,18 +95,18 @@ mod entries {
         }
 
         fn visit_nontree(&mut self, entry: &EntryRef<'_>) -> Action {
-            use gix::objs::tree::EntryMode::*;
             let size = self
                 .repo
-                .and_then(|repo| repo.find_object(entry.oid).map(|o| o.data.len()).ok());
+                .and_then(|repo| repo.find_header(entry.oid).map(|h| h.size()).ok());
             if let Some(out) = &mut self.out {
                 format_entry(out, entry, self.path.as_bstr(), size).ok();
             }
             if let Some(size) = size {
-                self.stats.num_bytes += size as u64;
+                self.stats.num_bytes += size;
             }
 
-            match entry.mode {
+            use gix::object::tree::EntryKind::*;
+            match entry.mode.kind() {
                 Commit => self.stats.num_submodules += 1,
                 Blob => self.stats.num_blobs += 1,
                 BlobExecutable => self.stats.num_blobs_exec += 1,
@@ -154,8 +160,9 @@ pub fn entries(
     let tree = treeish_to_tree(treeish, &repo)?;
 
     if recursive {
-        let mut delegate = entries::Traverse::new(extended.then_some(&repo), Some(&mut out));
-        tree.traverse().breadthfirst(&mut delegate)?;
+        let mut write = BufWriter::new(out);
+        let mut delegate = entries::Traverse::new(extended.then_some(&repo), Some(&mut write));
+        tree.traverse().depthfirst(&mut delegate)?;
     } else {
         for entry in tree.iter() {
             let entry = entry?;
@@ -163,9 +170,7 @@ pub fn entries(
                 &mut out,
                 &entry.inner,
                 entry.inner.filename,
-                extended
-                    .then(|| entry.id().object().map(|o| o.data.len()))
-                    .transpose()?,
+                extended.then(|| entry.id().header().map(|o| o.size())).transpose()?,
             )?;
         }
     }
@@ -182,13 +187,13 @@ fn format_entry(
     mut out: impl io::Write,
     entry: &gix::objs::tree::EntryRef<'_>,
     filename: &gix::bstr::BStr,
-    size: Option<usize>,
+    size: Option<u64>,
 ) -> std::io::Result<()> {
-    use gix::objs::tree::EntryMode::*;
-    writeln!(
+    use gix::objs::tree::EntryKind::*;
+    write!(
         out,
-        "{} {}{} {}",
-        match entry.mode {
+        "{} {}{} ",
+        match entry.mode.kind() {
             Tree => "TREE",
             Blob => "BLOB",
             BlobExecutable => " EXE",
@@ -196,7 +201,8 @@ fn format_entry(
             Commit => "SUBM",
         },
         entry.oid,
-        size.map_or_else(|| "".into(), |s| Cow::Owned(format!(" {s}"))),
-        filename
-    )
+        size.map_or_else(|| "".into(), |s| Cow::Owned(format!(" {s}")))
+    )?;
+    out.write_all(filename)?;
+    out.write_all(b"\n")
 }

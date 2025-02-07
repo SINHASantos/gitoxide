@@ -7,30 +7,101 @@ use gix_features::{progress::Progress, threading, zlib};
 
 use crate::{
     cache::delta::{
-        traverse::{
-            util::{ItemSliceSend, Node},
-            Context, Error,
-        },
+        traverse::{util::ItemSliceSync, Context, Error},
         Item,
     },
     data,
     data::EntryRange,
 };
 
-pub(crate) struct State<P, F, MBFN, T: Send> {
-    pub delta_bytes: Vec<u8>,
-    pub fully_resolved_delta_bytes: Vec<u8>,
-    pub progress: P,
-    pub resolve: F,
-    pub modify_base: MBFN,
-    pub child_items: ItemSliceSend<Item<T>>,
+mod root {
+    use crate::cache::delta::{traverse::util::ItemSliceSync, Item};
+
+    /// An item returned by `iter_root_chunks`, allowing access to the `data` stored alongside nodes in a [`Tree`].
+    pub(crate) struct Node<'a, T: Send> {
+        // SAFETY INVARIANT: see Node::new(). That function is the only one used
+        // to create or modify these fields.
+        item: &'a mut Item<T>,
+        child_items: &'a ItemSliceSync<'a, Item<T>>,
+    }
+
+    impl<'a, T: Send> Node<'a, T> {
+        /// SAFETY: `item.children` must uniquely reference elements in child_items that no other currently alive
+        /// item does. All child_items must also have unique children, unless the child_item is itself `item`,
+        /// in which case no other live item should reference it in its `item.children`.
+        ///
+        /// This safety invariant can be reliably upheld by making sure `item` comes from a Tree and `child_items`
+        /// was constructed using that Tree's child_items. This works since Tree has this invariant as well: all
+        /// child_items are referenced at most once (really, exactly once) by a node in the tree.
+        ///
+        /// Note that this invariant is a bit more relaxed than that on `deltas()`, because this function can be called
+        /// for traversal within a child item, which happens in into_child_iter()
+        #[allow(unsafe_code)]
+        pub(super) unsafe fn new(item: &'a mut Item<T>, child_items: &'a ItemSliceSync<'a, Item<T>>) -> Self {
+            Node { item, child_items }
+        }
+    }
+
+    impl<'a, T: Send> Node<'a, T> {
+        /// Returns the offset into the pack at which the `Node`s data is located.
+        pub fn offset(&self) -> u64 {
+            self.item.offset
+        }
+
+        /// Returns the slice into the data pack at which the pack entry is located.
+        pub fn entry_slice(&self) -> crate::data::EntryRange {
+            self.item.offset..self.item.next_offset
+        }
+
+        /// Returns the node data associated with this node.
+        pub fn data(&mut self) -> &mut T {
+            &mut self.item.data
+        }
+
+        /// Returns true if this node has children, e.g. is not a leaf in the tree.
+        pub fn has_children(&self) -> bool {
+            !self.item.children().is_empty()
+        }
+
+        /// Transform this `Node` into an iterator over its children.
+        ///
+        /// Children are `Node`s referring to pack entries whose base object is this pack entry.
+        pub fn into_child_iter(self) -> impl Iterator<Item = Node<'a, T>> + 'a {
+            let children = self.child_items;
+            #[allow(unsafe_code)]
+            self.item.children().iter().map(move |&index| {
+                // SAFETY: Due to the invariant on new(), we can rely on these indices
+                // being unique.
+                let item = unsafe { children.get_mut(index as usize) };
+                // SAFETY: Since every child_item is also required to uphold the uniqueness guarantee,
+                // creating a Node with one of the child_items that we are allowed access to is still fine.
+                unsafe { Node::new(item, children) }
+            })
+        }
+    }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn deltas<T, F, MBFN, E, R, P>(
-    object_counter: Option<gix_features::progress::StepShared>,
-    size_counter: Option<gix_features::progress::StepShared>,
-    node: &mut Item<T>,
+pub(super) struct State<'items, F, MBFN, T: Send> {
+    pub delta_bytes: Vec<u8>,
+    pub fully_resolved_delta_bytes: Vec<u8>,
+    pub progress: Box<dyn Progress>,
+    pub resolve: F,
+    pub modify_base: MBFN,
+    pub child_items: &'items ItemSliceSync<'items, Item<T>>,
+}
+
+/// SAFETY: `item.children` must uniquely reference elements in child_items that no other currently alive
+/// item does. All child_items must also have unique children.
+///
+/// This safety invariant can be reliably upheld by making sure `item` comes from a Tree and `child_items`
+/// was constructed using that Tree's child_items. This works since Tree has this invariant as well: all
+/// child_items are referenced at most once (really, exactly once) by a node in the tree.
+#[allow(clippy::too_many_arguments, unsafe_code)]
+#[deny(unsafe_op_in_unsafe_fn)] // this is a big function, require unsafe for the one small unsafe op we have
+pub(super) unsafe fn deltas<T, F, MBFN, E, R>(
+    objects: gix_features::progress::StepShared,
+    size: gix_features::progress::StepShared,
+    item: &mut Item<T>,
     State {
         delta_bytes,
         fully_resolved_delta_bytes,
@@ -38,7 +109,7 @@ pub(crate) fn deltas<T, F, MBFN, E, R, P>(
         resolve,
         modify_base,
         child_items,
-    }: &mut State<P, F, MBFN, T>,
+    }: &mut State<'_, F, MBFN, T>,
     resolve_data: &R,
     hash_len: usize,
     threads_left: &AtomicIsize,
@@ -47,9 +118,8 @@ pub(crate) fn deltas<T, F, MBFN, E, R, P>(
 where
     T: Send,
     R: Send + Sync,
-    P: Progress,
     F: for<'r> Fn(EntryRange, &'r R) -> Option<&'r [u8]> + Send + Clone,
-    MBFN: FnMut(&mut T, &P, Context<'_>) -> Result<(), E> + Send + Clone,
+    MBFN: FnMut(&mut T, &dyn Progress, Context<'_>) -> Result<(), E> + Send + Clone,
     E: std::error::Error + Send + Sync + 'static,
 {
     let mut decompressed_bytes_by_pack_offset = BTreeMap::new();
@@ -58,7 +128,7 @@ where
         let bytes = resolve(slice.clone(), resolve_data).ok_or(Error::ResolveFailed {
             pack_offset: slice.start,
         })?;
-        let entry = data::Entry::from_bytes(bytes, slice.start, hash_len);
+        let entry = data::Entry::from_bytes(bytes, slice.start, hash_len)?;
         let compressed = &bytes[entry.header_size()..];
         let decompressed_len = entry.decompressed_size as usize;
         decompress_all_at_once_with(&mut inflate, compressed, decompressed_len, out)?;
@@ -68,13 +138,10 @@ where
     // each node is a base, and its children always start out as deltas which become a base after applying them.
     // These will be pushed onto our stack until all are processed
     let root_level = 0;
-    let mut nodes: Vec<_> = vec![(
-        root_level,
-        Node {
-            item: node,
-            child_items: child_items.clone(),
-        },
-    )];
+    // SAFETY: This invariant is required from the caller
+    #[allow(unsafe_code)]
+    let root_node = unsafe { root::Node::new(item, child_items) };
+    let mut nodes: Vec<_> = vec![(root_level, root_node)];
     while let Some((level, mut base)) = nodes.pop() {
         if should_interrupt.load(Ordering::Relaxed) {
             return Err(Error::Interrupted);
@@ -104,10 +171,8 @@ where
                 },
             )
             .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)?;
-            object_counter.as_ref().map(|c| c.fetch_add(1, Ordering::SeqCst));
-            size_counter
-                .as_ref()
-                .map(|c| c.fetch_add(base_bytes.len(), Ordering::SeqCst));
+            objects.fetch_add(1, Ordering::Relaxed);
+            size.fetch_add(base_bytes.len(), Ordering::Relaxed);
         }
 
         for mut child in base.into_child_iter() {
@@ -122,7 +187,7 @@ where
             let (result_size, consumed) = data::delta::decode_header_size(&delta_bytes[consumed..]);
             header_ofs += consumed;
 
-            set_len(fully_resolved_delta_bytes, result_size as usize);
+            fully_resolved_delta_bytes.resize(result_size as usize, 0);
             data::delta::apply(&base_bytes, fully_resolved_delta_bytes, &delta_bytes[header_ofs..]);
 
             // FIXME: this actually invalidates the "pack_offset()" computation, which is not obvious to consumers
@@ -137,7 +202,7 @@ where
             } else {
                 modify_base(
                     child.data(),
-                    progress,
+                    &progress,
                     Context {
                         entry: &child_entry,
                         entry_end,
@@ -146,10 +211,8 @@ where
                     },
                 )
                 .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)?;
-                object_counter.as_ref().map(|c| c.fetch_add(1, Ordering::SeqCst));
-                size_counter
-                    .as_ref()
-                    .map(|c| c.fetch_add(base_bytes.len(), Ordering::SeqCst));
+                objects.fetch_add(1, Ordering::Relaxed);
+                size.fetch_add(base_bytes.len(), Ordering::Relaxed);
             }
         }
 
@@ -169,9 +232,9 @@ where
                 return deltas_mt(
                     initial_threads,
                     decompressed_bytes_by_pack_offset,
-                    object_counter,
-                    size_counter,
-                    progress,
+                    objects,
+                    size,
+                    &progress,
                     nodes,
                     resolve.clone(),
                     resolve_data,
@@ -191,13 +254,13 @@ where
 ///    system. Since this thread will take a controlling function, we may spawn one more than that. In threaded mode, we will finish
 ///    all remaining work.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn deltas_mt<T, F, MBFN, E, R, P>(
+fn deltas_mt<T, F, MBFN, E, R>(
     mut threads_to_create: isize,
     decompressed_bytes_by_pack_offset: BTreeMap<u64, (data::Entry, u64, Vec<u8>)>,
-    object_counter: Option<gix_features::progress::StepShared>,
-    size_counter: Option<gix_features::progress::StepShared>,
-    progress: &P,
-    nodes: Vec<(u16, Node<'_, T>)>,
+    objects: gix_features::progress::StepShared,
+    size: gix_features::progress::StepShared,
+    progress: &dyn Progress,
+    nodes: Vec<(u16, root::Node<'_, T>)>,
     resolve: F,
     resolve_data: &R,
     modify_base: MBFN,
@@ -208,9 +271,8 @@ pub(crate) fn deltas_mt<T, F, MBFN, E, R, P>(
 where
     T: Send,
     R: Send + Sync,
-    P: Progress,
     F: for<'r> Fn(EntryRange, &'r R) -> Option<&'r [u8]> + Send + Clone,
-    MBFN: FnMut(&mut T, &P, Context<'_>) -> Result<(), E> + Send + Clone,
+    MBFN: FnMut(&mut T, &dyn Progress, Context<'_>) -> Result<(), E> + Send + Clone,
     E: std::error::Error + Send + Sync + 'static,
 {
     let nodes = gix_features::threading::Mutable::new(nodes);
@@ -230,8 +292,8 @@ where
                         let decompressed_bytes_by_pack_offset = &decompressed_bytes_by_pack_offset;
                         let resolve = resolve.clone();
                         let mut modify_base = modify_base.clone();
-                        let object_counter = object_counter.as_ref();
-                        let size_counter = size_counter.as_ref();
+                        let objects = &objects;
+                        let size = &size;
 
                         move || -> Result<(), Error> {
                             let mut fully_resolved_delta_bytes = Vec::new();
@@ -242,7 +304,7 @@ where
                                     let bytes = resolve(slice.clone(), resolve_data).ok_or(Error::ResolveFailed {
                                         pack_offset: slice.start,
                                     })?;
-                                    let entry = data::Entry::from_bytes(bytes, slice.start, hash_len);
+                                    let entry = data::Entry::from_bytes(bytes, slice.start, hash_len)?;
                                     let compressed = &bytes[entry.header_size()..];
                                     let decompressed_len = entry.decompressed_size as usize;
                                     decompress_all_at_once_with(&mut inflate, compressed, decompressed_len, out)?;
@@ -282,10 +344,8 @@ where
                                         },
                                     )
                                     .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)?;
-                                    object_counter.as_ref().map(|c| c.fetch_add(1, Ordering::SeqCst));
-                                    size_counter
-                                        .as_ref()
-                                        .map(|c| c.fetch_add(base_bytes.len(), Ordering::SeqCst));
+                                    objects.fetch_add(1, Ordering::Relaxed);
+                                    size.fetch_add(base_bytes.len(), Ordering::Relaxed);
                                 }
 
                                 for mut child in base.into_child_iter() {
@@ -330,10 +390,8 @@ where
                                             },
                                         )
                                         .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)?;
-                                        object_counter.as_ref().map(|c| c.fetch_add(1, Ordering::SeqCst));
-                                        size_counter
-                                            .as_ref()
-                                            .map(|c| c.fetch_add(base_bytes.len(), Ordering::SeqCst));
+                                        objects.fetch_add(1, Ordering::Relaxed);
+                                        size.fetch_add(base_bytes.len(), Ordering::Relaxed);
                                     }
                                 }
                             }
@@ -394,28 +452,13 @@ where
     })
 }
 
-fn set_len(v: &mut Vec<u8>, new_len: usize) {
-    if new_len > v.len() {
-        v.reserve_exact(new_len.saturating_sub(v.capacity()) + (v.capacity() - v.len()));
-        // SAFETY:
-        // 1. we have reserved enough capacity to fit `new_len`
-        // 2. the caller is trusted to write into `v` to completely fill `new_len`.
-        #[allow(unsafe_code, clippy::uninit_vec)]
-        unsafe {
-            v.set_len(new_len);
-        }
-    } else {
-        v.truncate(new_len)
-    }
-}
-
 fn decompress_all_at_once_with(
     inflate: &mut zlib::Inflate,
     b: &[u8],
     decompressed_len: usize,
     out: &mut Vec<u8>,
 ) -> Result<(), Error> {
-    set_len(out, decompressed_len);
+    out.resize(decompressed_len, 0);
     inflate.reset();
     inflate.once(b, out).map_err(|err| Error::ZlibInflate {
         source: err,

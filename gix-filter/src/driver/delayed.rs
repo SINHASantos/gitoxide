@@ -45,6 +45,7 @@ pub mod fetch {
     }
 }
 
+/// Operations related to delayed filtering.
 impl State {
     /// Return a list of delayed paths for `process` that can then be obtained with [`fetch_delayed()`][Self::fetch_delayed()].
     ///
@@ -65,9 +66,9 @@ impl State {
             })?;
 
         let mut out = Vec::new();
-        let result = client.invoke_without_content("list_available_blobs", None, |line| {
+        let result = client.invoke_without_content("list_available_blobs", &mut None.into_iter(), &mut |line| {
             if let Some(path) = line.strip_prefix(b"pathname=") {
-                out.push(path.into())
+                out.push(path.into());
             }
         });
         let status = match result {
@@ -111,7 +112,11 @@ impl State {
                 wanted: process.clone(),
             })?;
 
-        let result = client.invoke(operation.as_str(), [("pathname", path.to_owned())], &b""[..]);
+        let result = client.invoke(
+            operation.as_str(),
+            &mut [("pathname", path.to_owned())].into_iter(),
+            &mut &b""[..],
+        );
         let status = match result {
             Ok(status) => status,
             Err(err) => {

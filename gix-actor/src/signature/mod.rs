@@ -95,7 +95,7 @@ pub(crate) mod write {
     /// Output
     impl Signature {
         /// Serialize this instance to `out` in the git serialization format for actors.
-        pub fn write_to(&self, out: impl std::io::Write) -> std::io::Result<()> {
+        pub fn write_to(&self, out: &mut dyn std::io::Write) -> std::io::Result<()> {
             self.to_ref().write_to(out)
         }
         /// Computes the number of bytes necessary to serialize this signature
@@ -104,9 +104,9 @@ pub(crate) mod write {
         }
     }
 
-    impl<'a> SignatureRef<'a> {
+    impl SignatureRef<'_> {
         /// Serialize this instance to `out` in the git serialization format for actors.
-        pub fn write_to(&self, mut out: impl std::io::Write) -> std::io::Result<()> {
+        pub fn write_to(&self, out: &mut dyn std::io::Write) -> std::io::Result<()> {
             out.write_all(validated_token(self.name)?)?;
             out.write_all(b" ")?;
             out.write_all(b"<")?;

@@ -10,7 +10,7 @@ impl Arguments {
         &mut self,
         transport: &'a mut T,
         add_done_argument: bool,
-    ) -> Result<Box<dyn client::ExtendedBufRead + Unpin + 'a>, client::Error> {
+    ) -> Result<Box<dyn client::ExtendedBufRead<'a> + Unpin + 'a>, client::Error> {
         if self.haves.is_empty() {
             assert!(add_done_argument, "If there are no haves, is_done must be true.");
         }
@@ -20,8 +20,11 @@ impl Arguments {
                     transport.connection_persists_across_multiple_requests(),
                     add_done_argument,
                 )?;
-                let mut line_writer =
-                    transport.request(client::WriteMode::OneLfTerminatedLinePerWriteCall, on_into_read)?;
+                let mut line_writer = transport.request(
+                    client::WriteMode::OneLfTerminatedLinePerWriteCall,
+                    on_into_read,
+                    self.trace,
+                )?;
                 let had_args = !self.args.is_empty();
                 for arg in self.args.drain(..) {
                     line_writer.write_all(&arg)?;
@@ -47,6 +50,7 @@ impl Arguments {
                     Command::Fetch.as_str(),
                     self.features.iter().filter(|(_, v)| v.is_some()).cloned(),
                     Some(std::mem::replace(&mut self.args, retained_state).into_iter()),
+                    self.trace,
                 )
             }
         }

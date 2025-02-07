@@ -50,8 +50,6 @@ mod write {
 
 ///
 pub mod decode {
-    use std::convert::TryFrom;
-
     use bstr::{BString, ByteSlice};
 
     use crate::protocol::{context, context::serde::validate, Context};

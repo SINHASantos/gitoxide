@@ -34,7 +34,7 @@ use bstr::{BStr, BString, ByteSlice};
 ///
 /// See [the tests][tests] for quotation examples.
 ///
-/// [tests]: https://github.com/Byron/gitoxide/blob/e355b4ad133075152312816816af5ce72cf79cff/gix-odb/src/alternate/unquote.rs#L110-L118
+/// [tests]: https://github.com/GitoxideLabs/gitoxide/blob/64872690e60efdd9267d517f4d9971eecd3b875c/gix-quote/tests/quote.rs#L57-L74
 pub fn undo(input: &BStr) -> Result<(Cow<'_, BStr>, usize), undo::Error> {
     if !input.starts_with(b"\"") {
         return Ok((input.into(), input.len()));
@@ -51,7 +51,9 @@ pub fn undo(input: &BStr) -> Result<(Cow<'_, BStr>, usize), undo::Error> {
             .get(position + 1..)
             .ok_or_else(|| undo::Error::new("Unexpected end of input", input))?
             .as_bstr();
-        let next = input[0];
+        let next = *input
+            .first()
+            .ok_or_else(|| undo::Error::new("Unexpected end of input", input))?;
         *input = input.get(1..).unwrap_or_default().as_bstr();
         Ok(next)
     }
@@ -87,7 +89,8 @@ pub fn undo(input: &BStr) -> Result<(Cow<'_, BStr>, usize), undo::Error> {
                                     })?
                                     .read_exact(&mut buf[1..])
                                     .expect("impossible to fail as numbers match");
-                                let byte = btoi::btou_radix(&buf, 8).map_err(|e| undo::Error::new(e, original))?;
+                                let byte = gix_utils::btoi::to_unsigned_with_radix(&buf, 8)
+                                    .map_err(|e| undo::Error::new(e, original))?;
                                 out.push(byte);
                                 input = &input[2..];
                                 consumed += 2;

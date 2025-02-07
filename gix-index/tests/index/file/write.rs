@@ -1,5 +1,5 @@
 use filetime::FileTime;
-use gix_index::{entry, extension, verify::extensions::no_find, write, write::Options, State, Version};
+use gix_index::{entry, extension, write, write::Options, State, Version};
 
 use crate::index::Fixture::*;
 
@@ -34,6 +34,47 @@ fn roundtrips() -> crate::Result {
         compare_states_against_baseline(&actual, actual_version, &expected, options, name);
         compare_raw_bytes(&out_bytes, &expected_bytes, name);
     }
+    Ok(())
+}
+
+#[test]
+fn skip_hash() -> crate::Result {
+    let tmp = gix_testtools::tempfile::TempDir::new()?;
+    let path = tmp.path().join("index");
+    let mut expected = Loose("conflicting-file").open();
+    assert!(expected.checksum().is_some());
+
+    expected.set_path(&path);
+    expected.write(Options {
+        extensions: Default::default(),
+        skip_hash: false,
+    })?;
+
+    let actual = gix_index::File::at(
+        &path,
+        expected.checksum().expect("present").kind(),
+        false,
+        Default::default(),
+    )?;
+    assert_eq!(
+        actual.checksum(),
+        expected.checksum(),
+        "a hash is written by default and it matches"
+    );
+
+    expected.write(Options {
+        extensions: Default::default(),
+        skip_hash: true,
+    })?;
+
+    let actual = gix_index::File::at(
+        &path,
+        expected.checksum().expect("present").kind(),
+        false,
+        Default::default(),
+    )?;
+    assert_eq!(actual.checksum(), None, "no hash is produced in this case");
+
     Ok(())
 }
 
@@ -187,7 +228,7 @@ fn compare_states_against_baseline(
 
 fn compare_states(actual: &State, actual_version: Version, expected: &State, options: Options, fixture: &str) {
     actual.verify_entries().expect("valid");
-    actual.verify_extensions(false, no_find).expect("valid");
+    actual.verify_extensions(false, gix_object::find::Never).expect("valid");
 
     assert_eq!(
         actual.version(),
@@ -253,9 +294,13 @@ fn only_tree_ext() -> Options {
             end_of_index_entry: false,
             tree_cache: true,
         },
+        skip_hash: false,
     }
 }
 
 fn options_with(extensions: write::Extensions) -> Options {
-    Options { extensions }
+    Options {
+        extensions,
+        skip_hash: false,
+    }
 }

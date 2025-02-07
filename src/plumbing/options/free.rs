@@ -14,6 +14,8 @@ pub enum Subcommands {
     Pack(pack::Subcommands),
     /// Subcommands for interacting with a worktree index, typically at .git/index
     Index(index::Platform),
+    /// Show information about repository discovery and when opening a repository at the current path.
+    Discover,
 }
 
 ///
@@ -63,6 +65,9 @@ pub mod index {
             /// back by default, but that requires us to write more of the index to work.
             #[clap(long, short = 'i')]
             index_output_path: Option<PathBuf>,
+            /// Don't write the trailing hash for a performance gain.
+            #[clap(long, short = 's')]
+            skip_hash: bool,
             /// The file to read the index entries from, one path per line.
             file: PathBuf,
         },

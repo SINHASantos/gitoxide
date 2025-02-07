@@ -5,7 +5,7 @@ use gix::{
     actor,
     bstr::{BStr, ByteSlice},
     prelude::*,
-    progress, Progress,
+    progress, Count, NestedProgress, Progress,
 };
 
 /// Additional configuration for the hours estimation functionality.
@@ -49,7 +49,7 @@ pub fn estimate<W, P>(
 ) -> anyhow::Result<()>
 where
     W: io::Write,
-    P: Progress,
+    P: NestedProgress,
 {
     let repo = gix::discover(working_dir)?;
     let commit_id = repo.rev_parse_single(rev_spec)?.detach();
@@ -140,7 +140,7 @@ where
             let mut skipped_merge_commits = 0;
             const CHUNK_SIZE: usize = 50;
             let mut chunk = Vec::with_capacity(CHUNK_SIZE);
-            let mut commit_iter = commit_id.ancestors(|oid, buf| repo.objects.find_commit_iter(oid, buf));
+            let mut commit_iter = commit_id.ancestors(&repo.objects);
             let mut is_shallow = false;
             while let Some(c) = commit_iter.next() {
                 progress.inc();
@@ -170,12 +170,12 @@ where
                                     .send(std::mem::replace(&mut chunk, Vec::with_capacity(CHUNK_SIZE)))
                                     .ok();
                             } else {
-                                chunk.push((commit_idx, first_parent, commit))
+                                chunk.push((commit_idx, first_parent, commit));
                             }
                         }
                         commit_idx += 1;
                     }
-                    Err(gix::traverse::commit::ancestors::Error::FindExisting { .. }) => {
+                    Err(gix::traverse::commit::simple::Error::Find { .. }) => {
                         is_shallow = true;
                         break;
                     }

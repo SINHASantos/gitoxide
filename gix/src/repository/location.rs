@@ -15,6 +15,17 @@ impl crate::Repository {
         self.options.git_dir_trust.expect("definitely set by now")
     }
 
+    /// Return the current working directory as present during the instantiation of this repository.
+    ///
+    /// Note that this should be preferred over manually obtaining it as this may have been adjusted to
+    /// deal with `core.precomposeUnicode`.
+    pub fn current_dir(&self) -> &Path {
+        self.options
+            .current_dir
+            .as_deref()
+            .expect("BUG: cwd is always set after instantiation")
+    }
+
     /// Returns the main git repository if this is a repository on a linked work-tree, or the `git_dir` itself.
     pub fn common_dir(&self) -> &std::path::Path {
         self.common_dir.as_deref().unwrap_or_else(|| self.git_dir())
@@ -26,6 +37,7 @@ impl crate::Repository {
     }
 
     /// The path to the `.gitmodules` file in the worktree, if a worktree is available.
+    #[cfg(feature = "attributes")]
     pub fn modules_path(&self) -> Option<PathBuf> {
         self.work_dir().map(|wtd| wtd.join(crate::submodule::MODULES_FILE))
     }
@@ -36,6 +48,7 @@ impl crate::Repository {
     }
 
     /// Return the work tree containing all checked out files, if there is one.
+    #[doc(alias = "workdir", alias = "git2")]
     pub fn work_dir(&self) -> Option<&std::path::Path> {
         self.work_tree.as_deref()
     }

@@ -1,9 +1,10 @@
+use std::borrow::Cow;
 use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
 };
 
-use gix::{objs::bstr::ByteSlice, progress, Progress};
+use gix::{objs::bstr::ByteSlice, progress, NestedProgress, Progress};
 
 #[derive(Default, Copy, Clone, Eq, PartialEq)]
 pub enum Mode {
@@ -92,10 +93,10 @@ pub fn find_git_repository_workdirs(
 fn find_origin_remote(repo: &Path) -> anyhow::Result<Option<gix_url::Url>> {
     let non_bare = repo.join(".git").join("config");
     let local = gix::config::Source::Local;
-    let config = gix::config::File::from_path_no_includes(non_bare.as_path(), local)
-        .or_else(|_| gix::config::File::from_path_no_includes(repo.join("config").as_path(), local))?;
+    let config = gix::config::File::from_path_no_includes(non_bare.as_path().into(), local)
+        .or_else(|_| gix::config::File::from_path_no_includes(repo.join("config"), local))?;
     Ok(config
-        .string_by_key("remote.origin.url")
+        .string("remote.origin.url")
         .map(|url| gix_url::Url::from_bytes(url.as_ref()))
         .transpose()?)
 }
@@ -198,16 +199,32 @@ fn handle(
             destination.display()
         )),
         Mode::Execute => {
-            std::fs::create_dir_all(destination.parent().expect("repo destination is not the root"))?;
+            if destination.starts_with(
+                git_workdir
+                    .canonicalize()
+                    .ok()
+                    .map(Cow::Owned)
+                    .unwrap_or(Cow::Borrowed(git_workdir)),
+            ) {
+                let tempdir = tempfile::tempdir_in(canonicalized_destination)?;
+                let tempdest = tempdir
+                    .path()
+                    .join(destination.file_name().expect("repo destination is not the root"));
+                std::fs::rename(git_workdir, &tempdest)?;
+                std::fs::create_dir_all(destination.parent().expect("repo destination is not the root"))?;
+                std::fs::rename(&tempdest, &destination)?;
+            } else {
+                std::fs::create_dir_all(destination.parent().expect("repo destination is not the root"))?;
+                std::fs::rename(git_workdir, &destination)?;
+            }
             progress.done(format!("Moving {} to {}", git_workdir.display(), destination.display()));
-            std::fs::rename(git_workdir, &destination)?;
         }
     }
     Ok(())
 }
 
 /// Find all working directories in the given `source_dir` and print them to `out` while providing `progress`.
-pub fn discover<P: Progress>(
+pub fn discover<P: NestedProgress>(
     source_dir: impl AsRef<Path>,
     mut out: impl std::io::Write,
     mut progress: P,
@@ -222,7 +239,7 @@ pub fn discover<P: Progress>(
     Ok(())
 }
 
-pub fn run<P: Progress>(
+pub fn run<P: NestedProgress>(
     mode: Mode,
     source_dir: impl AsRef<Path>,
     destination: impl AsRef<Path>,

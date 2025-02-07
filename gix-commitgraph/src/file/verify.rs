@@ -147,7 +147,7 @@ impl File {
         let data_len_without_trailer = self.data.len() - self.hash_len;
         let mut hasher = gix_features::hash::hasher(self.object_hash());
         hasher.update(&self.data[..data_len_without_trailer]);
-        let actual = gix_hash::ObjectId::from(hasher.digest().as_ref());
+        let actual = gix_hash::ObjectId::from_bytes_or_panic(hasher.digest().as_ref());
 
         let expected = self.checksum();
         if actual == expected {
@@ -160,8 +160,7 @@ impl File {
 
 /// If the given path's filename matches "graph-{hash}.graph", check that `hash` matches the
 /// expected hash.
-fn verify_split_chain_filename_hash(path: impl AsRef<Path>, expected: &gix_hash::oid) -> Result<(), String> {
-    let path = path.as_ref();
+fn verify_split_chain_filename_hash(path: &Path, expected: &gix_hash::oid) -> Result<(), String> {
     path.file_name()
         .and_then(std::ffi::OsStr::to_str)
         .and_then(|filename| filename.strip_suffix(".graph"))

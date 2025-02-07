@@ -3,15 +3,15 @@
 //! These are provided in [borrowed versions][oid] as well as an [owned one][ObjectId].
 //! ## Feature Flags
 #![cfg_attr(
-    feature = "document-features",
-    cfg_attr(doc, doc = ::document_features::document_features!())
+    all(doc, feature = "document-features"),
+    doc = ::document_features::document_features!()
 )]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(all(doc, feature = "document-features"), feature(doc_cfg, doc_auto_cfg))]
 #![deny(missing_docs, rust_2018_idioms, unsafe_code)]
 
 #[path = "oid.rs"]
 mod borrowed;
-pub use borrowed::oid;
+pub use borrowed::{oid, Error};
 
 mod object_id;
 pub use object_id::{decode, ObjectId};
@@ -19,7 +19,7 @@ pub use object_id::{decode, ObjectId};
 ///
 pub mod prefix;
 
-/// An partial, owned hash possibly identifying an object uniquely, whose non-prefix bytes are zeroed.
+/// A partial, owned hash possibly identifying an object uniquely, whose non-prefix bytes are zeroed.
 ///
 /// An example would `0000000000000000000000000000000032bd3242`, where `32bd3242` is the prefix,
 /// which would be able to match all hashes that *start with* `32bd3242`.

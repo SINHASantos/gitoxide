@@ -20,9 +20,9 @@ pub fn init_env_logger() {
 }
 
 #[cfg(feature = "prodash-render-line")]
-pub fn progress_tree() -> std::sync::Arc<prodash::tree::Root> {
+pub fn progress_tree(trace: bool) -> std::sync::Arc<prodash::tree::Root> {
     prodash::tree::root::Options {
-        message_buffer_capacity: 200,
+        message_buffer_capacity: if trace { 10_000 } else { 200 },
         ..Default::default()
     }
     .into()
@@ -55,7 +55,7 @@ pub mod pretty {
     #[cfg(feature = "small")]
     pub fn prepare_and_run<T>(
         name: &str,
-        _trace: bool,
+        trace: bool,
         verbose: bool,
         progress: bool,
         #[cfg_attr(not(feature = "prodash-render-tui"), allow(unused_variables))] progress_keep_open: bool,
@@ -77,7 +77,7 @@ pub mod pretty {
                 run(progress::DoOrDiscard::from(None), &mut stdout_lock, &mut stderr_lock)
             }
             (true, false) => {
-                let progress = crate::shared::progress_tree();
+                let progress = crate::shared::progress_tree(trace);
                 let sub_progress = progress.add_child(name);
 
                 use crate::shared::{self, STANDARD_RANGE};
@@ -101,8 +101,8 @@ pub mod pretty {
         enable: bool,
         reverse_lines: bool,
         progress: &gix::progress::prodash::tree::Root,
-    ) -> anyhow::Result<tracing::subscriber::DefaultGuard> {
-        Ok(if enable {
+    ) -> anyhow::Result<()> {
+        if enable {
             let processor = tracing_forest::Printer::new().formatter({
                 let progress = std::sync::Mutex::new(progress.add_child("tracing"));
                 move |tree: &tracing_forest::tree::Tree| -> Result<String, std::fmt::Error> {
@@ -112,11 +112,11 @@ pub mod pretty {
                     let tree = tracing_forest::printer::Pretty.fmt(tree)?;
                     if reverse_lines {
                         for line in tree.lines().rev() {
-                            progress.info(line);
+                            progress.info(line.into());
                         }
                     } else {
                         for line in tree.lines() {
-                            progress.info(line);
+                            progress.info(line.into());
                         }
                     }
                     Ok(String::new())
@@ -124,10 +124,11 @@ pub mod pretty {
             });
             use tracing_subscriber::layer::SubscriberExt;
             let subscriber = tracing_subscriber::Registry::default().with(tracing_forest::ForestLayer::from(processor));
-            tracing::subscriber::set_default(subscriber)
+            tracing::subscriber::set_global_default(subscriber)?;
         } else {
-            tracing::subscriber::set_default(tracing_subscriber::Registry::default())
-        })
+            tracing::subscriber::set_global_default(tracing_subscriber::Registry::default())?;
+        }
+        Ok(())
     }
 
     #[cfg(not(feature = "small"))]
@@ -156,9 +157,9 @@ pub mod pretty {
             }
             (true, false) => {
                 use crate::shared::{self, STANDARD_RANGE};
-                let progress = shared::progress_tree();
+                let progress = shared::progress_tree(trace);
                 let sub_progress = progress.add_child(name);
-                let _trace = init_tracing(trace, false, &progress)?;
+                init_tracing(trace, false, &progress)?;
 
                 let handle = shared::setup_line_renderer_range(&progress, range.into().unwrap_or(STANDARD_RANGE));
 
@@ -269,28 +270,6 @@ pub fn setup_line_renderer_range(
     )
 }
 
-#[cfg(all(feature = "lean-cli", not(feature = "pretty-cli")))]
-pub fn from_env<T: argh::TopLevelCommand>() -> T {
-    static VERSION: &str = concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION"));
-    let strings: Vec<String> = std::env::args().collect();
-    let strs: Vec<&str> = strings.iter().map(|s| s.as_str()).collect();
-    T::from_args(&[strs[0]], &strs[1..]).unwrap_or_else(|early_exit| {
-        // This allows us to make subcommands mandatory,
-        // and trigger a helpful message unless --version is specified
-        if let Some(arg) = std::env::args().nth(1) {
-            if arg == "--version" {
-                println!("{}", VERSION);
-                std::process::exit(0);
-            }
-        }
-        println!("{}", early_exit.output);
-        std::process::exit(match early_exit.status {
-            Ok(()) => 0,
-            Err(()) => 1,
-        })
-    })
-}
-
 mod clap {
     use std::{ffi::OsStr, str::FromStr};
 
@@ -349,7 +328,7 @@ mod clap {
     pub struct AsPathSpec;
 
     static PATHSPEC_DEFAULTS: once_cell::sync::Lazy<gix::pathspec::Defaults> = once_cell::sync::Lazy::new(|| {
-        gix::pathspec::Defaults::from_environment(|n| std::env::var_os(n)).unwrap_or_default()
+        gix::pathspec::Defaults::from_environment(&mut |n| std::env::var_os(n)).unwrap_or_default()
     });
 
     impl TypedValueParser for AsPathSpec {
@@ -383,6 +362,28 @@ mod clap {
     }
 
     #[derive(Clone)]
+    pub struct ParseRenameFraction;
+
+    impl TypedValueParser for ParseRenameFraction {
+        type Value = f32;
+
+        fn parse_ref(&self, cmd: &Command, arg: Option<&Arg>, value: &OsStr) -> Result<Self::Value, Error> {
+            StringValueParser::new()
+                .try_map(|arg: String| -> Result<_, Box<dyn std::error::Error + Send + Sync>> {
+                    if arg.ends_with('%') {
+                        let val = u32::from_str(&arg[..arg.len() - 1])?;
+                        Ok(val as f32 / 100.0)
+                    } else {
+                        let val = u32::from_str(&arg)?;
+                        let num = format!("0.{val}");
+                        Ok(f32::from_str(&num)?)
+                    }
+                })
+                .parse_ref(cmd, arg, value)
+        }
+    }
+
+    #[derive(Clone)]
     pub struct AsTime;
 
     impl TypedValueParser for AsTime {
@@ -407,5 +408,75 @@ mod clap {
                 .parse_ref(cmd, arg, value)
         }
     }
+
+    #[derive(Clone)]
+    pub struct AsRange;
+
+    impl TypedValueParser for AsRange {
+        type Value = std::ops::Range<u32>;
+
+        fn parse_ref(&self, cmd: &Command, arg: Option<&Arg>, value: &OsStr) -> Result<Self::Value, Error> {
+            StringValueParser::new()
+                .try_map(|arg| -> Result<_, Box<dyn std::error::Error + Send + Sync>> {
+                    let parts = arg.split_once(',');
+                    if let Some((start, end)) = parts {
+                        let start = u32::from_str(start)?;
+                        let end = u32::from_str(end)?;
+
+                        if start <= end {
+                            return Ok(start..end);
+                        }
+                    }
+
+                    Err(Box::new(Error::new(ErrorKind::ValueValidation)))
+                })
+                .parse_ref(cmd, arg, value)
+        }
+    }
 }
-pub use self::clap::{AsBString, AsHashKind, AsOutputFormat, AsPartialRefName, AsPathSpec, AsTime, CheckPathSpec};
+pub use self::clap::{
+    AsBString, AsHashKind, AsOutputFormat, AsPartialRefName, AsPathSpec, AsRange, AsTime, CheckPathSpec,
+    ParseRenameFraction,
+};
+
+#[cfg(test)]
+mod value_parser_tests {
+    use super::{AsRange, ParseRenameFraction};
+    use clap::Parser;
+
+    #[test]
+    fn rename_fraction() {
+        #[derive(Debug, clap::Parser)]
+        pub struct Cmd {
+            #[clap(long, short='a', value_parser = ParseRenameFraction)]
+            pub arg: Option<Option<f32>>,
+        }
+
+        let c = Cmd::parse_from(["cmd", "-a"]);
+        assert_eq!(c.arg, Some(None), "this means we need to fill in the default");
+
+        let c = Cmd::parse_from(["cmd", "-a=50%"]);
+        assert_eq!(c.arg, Some(Some(0.5)), "percentages become a fraction");
+
+        let c = Cmd::parse_from(["cmd", "-a=100%"]);
+        assert_eq!(c.arg, Some(Some(1.0)));
+
+        let c = Cmd::parse_from(["cmd", "-a=5"]);
+        assert_eq!(c.arg, Some(Some(0.5)), "another way to specify fractions");
+
+        let c = Cmd::parse_from(["cmd", "-a=75"]);
+        assert_eq!(c.arg, Some(Some(0.75)));
+    }
+
+    #[test]
+    fn range() {
+        #[derive(Debug, clap::Parser)]
+        pub struct Cmd {
+            #[clap(long, short='l', value_parser = AsRange)]
+            pub arg: Option<std::ops::Range<u32>>,
+        }
+
+        let c = Cmd::parse_from(["cmd", "-l=1,10"]);
+        assert_eq!(c.arg, Some(1..10));
+    }
+}

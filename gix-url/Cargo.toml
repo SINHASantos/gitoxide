@@ -1,42 +1,39 @@
+lints.workspace = true
+
 [package]
 name = "gix-url"
-version = "0.21.1"
-repository = "https://github.com/Byron/gitoxide"
+version = "0.29.0"
+repository = "https://github.com/GitoxideLabs/gitoxide"
 license = "MIT OR Apache-2.0"
 description = "A crate of the gitoxide project implementing parsing and serialization of gix-url"
 authors = ["Sebastian Thiel <sebastian.thiel@icloud.com>"]
 edition = "2021"
-include = ["src/**/*", "LICENSE-*", "CHANGELOG.md"]
-rust-version = "1.65"
+include = ["src/**/*", "LICENSE-*", "tests/baseline/**/*"]
+rust-version = "1.70"
 
 [lib]
 doctest = false
-
-[[test]]
-name = "baseline"
-harness = false
 
 [features]
 ## Data structures implement `serde::Serialize` and `serde::Deserialize`.
 serde = ["dep:serde", "bstr/serde"]
 
 [dependencies]
-gix-features = { version = "^0.32.1", path = "../gix-features" }
-gix-path = { version = "^0.8.4", path = "../gix-path" }
+gix-features = { version = "^0.40.0", path = "../gix-features" }
+gix-path = { version = "^0.10.14", path = "../gix-path" }
 
-serde = { version = "1.0.114", optional = true, default-features = false, features = ["std", "derive"]}
-thiserror = "1.0.32"
-url = "2.1.1"
+serde = { version = "1.0.114", optional = true, default-features = false, features = ["std", "derive"] }
+thiserror = "2.0.0"
+url = "2.5.2"
 bstr = { version = "1.3.0", default-features = false, features = ["std"] }
-home = "0.5.3"
+percent-encoding = "2.3.1"
 
 document-features = { version = "0.2.0", optional = true }
 
 [dev-dependencies]
+assert_matches = "1.5.0"
 gix-testtools = { path = "../tests/tools" }
-libtest-mimic = "0.6.1"
 
 [package.metadata.docs.rs]
 all-features = true
 features = ["document-features"]
-rustdoc-args = ["--cfg", "docsrs"]

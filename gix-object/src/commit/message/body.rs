@@ -1,10 +1,10 @@
 use std::ops::Deref;
 
 use winnow::{
-    combinator::{eof, rest, separated_pair, terminated},
-    error::{ErrorKind, ParserError},
+    combinator::{eof, separated_pair, terminated},
+    error::ParserError,
     prelude::*,
-    token::take_until1,
+    token::{rest, take_until},
 };
 
 use crate::{
@@ -31,12 +31,12 @@ pub struct TrailerRef<'a> {
     pub value: &'a BStr,
 }
 
-fn parse_single_line_trailer<'a, E: ParserError<&'a [u8]>>(i: &mut &'a [u8]) -> PResult<(&'a BStr, &'a BStr), E> {
+fn parse_single_line_trailer<'a, E: ParserError<&'a [u8]>>(i: &mut &'a [u8]) -> ModalResult<(&'a BStr, &'a BStr), E> {
     *i = i.trim_end();
-    let (token, value) = separated_pair(take_until1(b":".as_ref()), b": ", rest).parse_next(i)?;
+    let (token, value) = separated_pair(take_until(1.., b":".as_ref()), b": ", rest).parse_next(i)?;
 
     if token.trim_end().len() != token.len() || value.trim_start().len() != value.len() {
-        Err(winnow::error::ErrMode::from_error_kind(i, ErrorKind::Fail).cut())
+        Err(winnow::error::ErrMode::from_input(i).cut())
     } else {
         Ok((token.as_bstr(), value.as_bstr()))
     }
@@ -101,13 +101,13 @@ impl<'a> BodyRef<'a> {
     }
 }
 
-impl<'a> AsRef<BStr> for BodyRef<'a> {
+impl AsRef<BStr> for BodyRef<'_> {
     fn as_ref(&self) -> &BStr {
         self.body_without_trailer
     }
 }
 
-impl<'a> Deref for BodyRef<'a> {
+impl Deref for BodyRef<'_> {
     type Target = BStr;
 
     fn deref(&self) -> &Self::Target {
@@ -143,7 +143,7 @@ mod test_parse_trailer {
     #[test]
     fn extra_whitespace_before_token_or_value_is_error() {
         assert!(parse_single_line_trailer::<()>.parse_peek(b"foo : bar").is_err());
-        assert!(parse_single_line_trailer::<()>.parse_peek(b"foo:  bar").is_err())
+        assert!(parse_single_line_trailer::<()>.parse_peek(b"foo:  bar").is_err());
     }
 
     #[test]

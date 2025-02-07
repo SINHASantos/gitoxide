@@ -76,6 +76,7 @@ impl Client {
         let mut input = gix_packetline::StreamingPeekableIter::new(
             process.stdout.take().expect("configured stdout when spawning"),
             &[gix_packetline::PacketLineRef::Flush],
+            false, /* packet tracing */
         );
         let mut read = input.as_read();
         let mut buf = String::new();
@@ -158,14 +159,14 @@ impl Client {
     }
 
     /// Invoke `command` and send all `meta` data before sending all `content` in full.
-    pub fn invoke<'a>(
+    pub fn invoke(
         &mut self,
         command: &str,
-        meta: impl IntoIterator<Item = (&'a str, BString)>,
-        mut content: impl std::io::Read,
+        meta: &mut dyn Iterator<Item = (&str, BString)>,
+        content: &mut dyn std::io::Read,
     ) -> Result<process::Status, invoke::Error> {
         self.send_command_and_meta(command, meta)?;
-        std::io::copy(&mut content, &mut self.input)?;
+        std::io::copy(content, &mut self.input)?;
         gix_packetline::encode::flush_to_write(self.input.inner_mut())?;
         self.input.flush()?;
         Ok(self.read_status()?)
@@ -178,14 +179,14 @@ impl Client {
     pub fn invoke_without_content<'a>(
         &mut self,
         command: &str,
-        meta: impl IntoIterator<Item = (&'a str, BString)>,
-        mut inspect_line: impl FnMut(&BStr),
+        meta: &mut dyn Iterator<Item = (&'a str, BString)>,
+        inspect_line: &mut dyn FnMut(&BStr),
     ) -> Result<process::Status, invoke::without_content::Error> {
         self.send_command_and_meta(command, meta)?;
         while let Some(data) = self.out.read_line() {
             let line = data??;
-            if let Some(line) = line.as_bstr() {
-                inspect_line(line);
+            if let Some(line) = line.as_text() {
+                inspect_line(line.as_bstr());
             }
         }
         self.out.reset_with(&[gix_packetline::PacketLineRef::Flush]);
@@ -210,10 +211,10 @@ impl Client {
 }
 
 impl Client {
-    fn send_command_and_meta<'a>(
+    fn send_command_and_meta(
         &mut self,
         command: &str,
-        meta: impl IntoIterator<Item = (&'a str, BString)>,
+        meta: &mut dyn Iterator<Item = (&str, BString)>,
     ) -> Result<(), invoke::Error> {
         self.input.write_all(format!("command={command}").as_bytes())?;
         let mut buf = BString::default();
@@ -255,7 +256,7 @@ struct ReadProcessOutputAndStatus<'a> {
     inner: PacketlineReader<'a>,
 }
 
-impl<'a> std::io::Read for ReadProcessOutputAndStatus<'a> {
+impl std::io::Read for ReadProcessOutputAndStatus<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let num_read = self.inner.read(buf)?;
         if num_read == 0 {

@@ -47,7 +47,7 @@ pub mod set_raw_value {
         #[error(transparent)]
         Header(#[from] crate::parse::section::header::Error),
         #[error(transparent)]
-        Key(#[from] crate::parse::section::key::Error),
+        ValueName(#[from] crate::parse::section::value_name::Error),
     }
 }
 
@@ -74,9 +74,6 @@ pub struct Section<'a> {
     meta: OwnShared<Metadata>,
     id: SectionId,
 }
-
-/// A function to filter metadata, returning `true` if the corresponding but omitted value can be used.
-pub type MetadataFilter = dyn FnMut(&'_ Metadata) -> bool;
 
 /// A strongly typed index into some range.
 #[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Clone, Copy)]

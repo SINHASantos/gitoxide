@@ -34,7 +34,13 @@ pub enum Error {
     RoundTrip { msg: &'static str, path: PathBuf },
     #[error("Could not obtain index object to check line endings for")]
     FetchObjectFromIndex(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
+    #[error("Could not allocate buffer")]
+    OutOfMemory(#[from] std::collections::TryReserveError),
 }
+
+/// A function that writes a buffer like `fn(&mut buf)` with by tes of an object in the index that is the one that should be converted.
+pub type IndexObjectFn<'a> =
+    dyn FnMut(&mut Vec<u8>) -> Result<Option<()>, Box<dyn std::error::Error + Send + Sync>> + 'a;
 
 pub(crate) mod function {
     use bstr::ByteSlice;
@@ -42,32 +48,30 @@ pub(crate) mod function {
     use crate::{
         clear_and_set_capacity,
         eol::{
-            convert_to_git::{Error, Options, RoundTripCheck},
+            convert_to_git::{Error, IndexObjectFn, Options, RoundTripCheck},
             AttributesDigest, Stats,
         },
     };
 
     /// Given a `src` buffer, change it `git` (`\n`) line endings and store the result in `buf`.
     /// Return `true` if `buf` was written or `false` if nothing had to be done.
-    /// `action` is used to determine if ultimately a conversion should be done or not.
-    /// When `action` takes certain values, `index_object` is called to write the version of `src` as stored in the index
+    /// Depending on the state in `buf`, `index_object` is called to write the version of `src` as stored in the index
     /// into the buffer and if it is a blob, or return `Ok(None)` if no such object exists.
-    /// If renormalization is desired, let it return `Ok(None)` at all times to not let it have any influence over the
-    /// outcome of this function.
+    ///
+    /// *If renormalization is desired*, let it return `Ok(None)` at all times to not let it have any influence over the
+    /// outcome of this function. Otherwise, it will check if the in-index buffer already has newlines that it would now
+    /// want to change, and avoid doing so as what's in Git should be what's desired (except for when *renormalizing*).
     /// If `round_trip_check` is not `None`, round-tripping will be validated and handled accordingly.
-    pub fn convert_to_git<E>(
+    pub fn convert_to_git(
         src: &[u8],
         digest: AttributesDigest,
         buf: &mut Vec<u8>,
-        index_object: impl FnOnce(&mut Vec<u8>) -> Result<Option<()>, E>,
+        index_object: &mut IndexObjectFn<'_>,
         Options {
             round_trip_check,
             config,
         }: Options<'_>,
-    ) -> Result<bool, Error>
-    where
-        E: std::error::Error + Send + Sync + 'static,
-    {
+    ) -> Result<bool, Error> {
         if digest == AttributesDigest::Binary || src.is_empty() {
             return Ok(false);
         }
@@ -80,7 +84,7 @@ pub(crate) mod function {
                 return Ok(false);
             }
 
-            if let Some(()) = index_object(buf).map_err(|err| Error::FetchObjectFromIndex(Box::new(err)))? {
+            if let Some(()) = index_object(buf).map_err(Error::FetchObjectFromIndex)? {
                 let has_crlf_in_index = buf
                     .find_byte(b'\r')
                     .map(|_| Stats::from_bytes(buf))
@@ -118,7 +122,7 @@ pub(crate) mod function {
                         gix_trace::warn!(
                             "in the working copy of '{}', CRLF will be replaced by LF next time git touches it",
                             rela_path.display()
-                        )
+                        );
                     }
                 }
             } else if stats.lone_lf > 0 && new_stats.lone_lf == 0 {
@@ -135,7 +139,7 @@ pub(crate) mod function {
                         gix_trace::warn!(
                             "in the working copy of '{}', LF will be replaced by CRLF next time git touches it",
                             rela_path.display()
-                        )
+                        );
                     }
                 }
             }
@@ -145,7 +149,7 @@ pub(crate) mod function {
             return Ok(false);
         }
 
-        clear_and_set_capacity(buf, src.len() - stats.crlf);
+        clear_and_set_capacity(buf, src.len() - stats.crlf)?;
         if stats.lone_cr == 0 {
             buf.extend(src.iter().filter(|b| **b != b'\r'));
         } else {

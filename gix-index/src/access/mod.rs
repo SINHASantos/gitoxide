@@ -1,9 +1,10 @@
-use std::cmp::Ordering;
+use std::{cmp::Ordering, ops::Range};
 
 use bstr::{BStr, ByteSlice, ByteVec};
 use filetime::FileTime;
 
-use crate::{entry, extension, Entry, PathStorage, State, Version};
+use crate::entry::{Stage, StageRaw};
+use crate::{entry, extension, AccelerateLookup, Entry, PathStorage, PathStorageRef, State, Version};
 
 // TODO: integrate this somehow, somewhere, depending on later usage.
 #[allow(dead_code)]
@@ -27,7 +28,7 @@ impl State {
     /// **will cause (file system) race conditions** see racy-git.txt in the git documentation
     /// for more details.
     pub fn set_timestamp(&mut self, timestamp: FileTime) {
-        self.timestamp = timestamp
+        self.timestamp = timestamp;
     }
 
     /// Return the kind of hashes used in this instance.
@@ -40,7 +41,7 @@ impl State {
         &self.entries
     }
     /// Return our path backing, the place which keeps all paths one after another, with entries storing only the range to access them.
-    pub fn path_backing(&self) -> &PathStorage {
+    pub fn path_backing(&self) -> &PathStorageRef {
         &self.path_backing
     }
 
@@ -57,7 +58,7 @@ impl State {
     /// Return mutable entries along with their path, as obtained from `backing`.
     pub fn entries_mut_with_paths_in<'state, 'backing>(
         &'state mut self,
-        backing: &'backing PathStorage,
+        backing: &'backing PathStorageRef,
     ) -> impl Iterator<Item = (&'state mut Entry, &'backing BStr)> {
         self.entries.iter_mut().map(move |e| {
             let path = backing[e.path.clone()].as_bstr();
@@ -81,14 +82,38 @@ impl State {
                 res
             })
             .ok()?;
-        self.entry_index_by_idx_and_stage(path, idx, stage, stage_cmp)
+        self.entry_index_by_idx_and_stage(path, idx, stage as StageRaw, stage_cmp)
+    }
+
+    /// Walk as far in `direction` as possible, with [`Ordering::Greater`] towards higher stages, and [`Ordering::Less`]
+    /// towards lower stages, and return the lowest or highest seen stage.
+    /// Return `None` if there is no greater or smaller stage.
+    fn walk_entry_stages(&self, path: &BStr, base: usize, direction: Ordering) -> Option<usize> {
+        match direction {
+            Ordering::Greater => self
+                .entries
+                .get(base + 1..)?
+                .iter()
+                .enumerate()
+                .take_while(|(_, e)| e.path(self) == path)
+                .last()
+                .map(|(idx, _)| base + 1 + idx),
+            Ordering::Equal => Some(base),
+            Ordering::Less => self.entries[..base]
+                .iter()
+                .enumerate()
+                .rev()
+                .take_while(|(_, e)| e.path(self) == path)
+                .last()
+                .map(|(idx, _)| idx),
+        }
     }
 
     fn entry_index_by_idx_and_stage(
         &self,
         path: &BStr,
         idx: usize,
-        wanted_stage: entry::Stage,
+        wanted_stage: entry::StageRaw,
         stage_cmp: Ordering,
     ) -> Option<usize> {
         match stage_cmp {
@@ -97,7 +122,7 @@ impl State {
                 .enumerate()
                 .rev()
                 .take_while(|(_, e)| e.path(self) == path)
-                .find_map(|(idx, e)| (e.stage() == wanted_stage).then_some(idx)),
+                .find_map(|(idx, e)| (e.stage_raw() == wanted_stage).then_some(idx)),
             Ordering::Equal => Some(idx),
             Ordering::Less => self
                 .entries
@@ -105,8 +130,130 @@ impl State {
                 .iter()
                 .enumerate()
                 .take_while(|(_, e)| e.path(self) == path)
-                .find_map(|(ofs, e)| (e.stage() == wanted_stage).then_some(idx + ofs + 1)),
+                .find_map(|(ofs, e)| (e.stage_raw() == wanted_stage).then_some(idx + ofs + 1)),
         }
+    }
+
+    /// Return a data structure to help with case-insensitive lookups.
+    ///
+    /// It's required perform any case-insensitive lookup.
+    /// TODO: needs multi-threaded insertion, raw-table to have multiple locks depending on bucket.
+    pub fn prepare_icase_backing(&self) -> AccelerateLookup<'_> {
+        let _span = gix_features::trace::detail!("prepare_icase_backing", entries = self.entries.len());
+        let mut out = AccelerateLookup::with_capacity(self.entries.len());
+        for entry in &self.entries {
+            let entry_path = entry.path(self);
+            let hash = AccelerateLookup::icase_hash(entry_path);
+            out.icase_entries
+                .insert_unique(hash, entry, |e| AccelerateLookup::icase_hash(e.path(self)));
+
+            let mut last_pos = entry_path.len();
+            while let Some(slash_idx) = entry_path[..last_pos].rfind_byte(b'/') {
+                let dir = entry_path[..slash_idx].as_bstr();
+                last_pos = slash_idx;
+                let dir_range = entry.path.start..(entry.path.start + dir.len());
+
+                let hash = AccelerateLookup::icase_hash(dir);
+                if out
+                    .icase_dirs
+                    .find(hash, |dir| {
+                        dir.path(self) == self.path_backing[dir_range.clone()].as_bstr()
+                    })
+                    .is_none()
+                {
+                    out.icase_dirs.insert_unique(
+                        hash,
+                        crate::DirEntry {
+                            entry,
+                            dir_end: dir_range.end,
+                        },
+                        |dir| AccelerateLookup::icase_hash(dir.path(self)),
+                    );
+                } else {
+                    break;
+                }
+            }
+        }
+        gix_features::trace::debug!(directories = out.icase_dirs.len(), "stored directories");
+        out
+    }
+
+    /// Return the entry at `path` that is at the lowest available stage, using `lookup` for acceleration.
+    /// It must have been created from this instance, and was ideally kept up-to-date with it.
+    ///
+    /// If `ignore_case` is `true`, a case-insensitive (ASCII-folding only) search will be performed.
+    pub fn entry_by_path_icase<'a>(
+        &'a self,
+        path: &BStr,
+        ignore_case: bool,
+        lookup: &AccelerateLookup<'a>,
+    ) -> Option<&'a Entry> {
+        lookup
+            .icase_entries
+            .find(AccelerateLookup::icase_hash(path), |e| {
+                let entry_path = e.path(self);
+                if entry_path == path {
+                    return true;
+                };
+                if !ignore_case {
+                    return false;
+                }
+                entry_path.eq_ignore_ascii_case(path)
+            })
+            .copied()
+    }
+
+    /// Return the entry (at any stage) that is inside of `directory`, or `None`,
+    /// using `lookup` for acceleration.
+    /// Note that submodules are not detected as directories and the user should
+    /// make another call to [`entry_by_path_icase()`](Self::entry_by_path_icase) to check for this
+    /// possibility. Doing so might also reveal a sparse directory.
+    ///
+    /// If `ignore_case` is set
+    pub fn entry_closest_to_directory_icase<'a>(
+        &'a self,
+        directory: &BStr,
+        ignore_case: bool,
+        lookup: &AccelerateLookup<'a>,
+    ) -> Option<&'a Entry> {
+        lookup
+            .icase_dirs
+            .find(AccelerateLookup::icase_hash(directory), |dir| {
+                let dir_path = dir.path(self);
+                if dir_path == directory {
+                    return true;
+                };
+                if !ignore_case {
+                    return false;
+                }
+                dir_path.eq_ignore_ascii_case(directory)
+            })
+            .map(|dir| dir.entry)
+    }
+
+    /// Return the entry (at any stage) that is inside of `directory`, or `None`.
+    /// Note that submodules are not detected as directories and the user should
+    /// make another call to [`entry_by_path_icase()`](Self::entry_by_path_icase) to check for this
+    /// possibility. Doing so might also reveal a sparse directory.
+    ///
+    /// Note that this is a case-sensitive search.
+    pub fn entry_closest_to_directory(&self, directory: &BStr) -> Option<&Entry> {
+        let idx = self.entry_index_by_path(directory).err()?;
+        for entry in &self.entries[idx..] {
+            let path = entry.path(self);
+            if path.get(..directory.len())? != directory {
+                break;
+            }
+            let dir_char = path.get(directory.len())?;
+            if *dir_char > b'/' {
+                break;
+            }
+            if *dir_char < b'/' {
+                continue;
+            }
+            return Some(entry);
+        }
+        None
     }
 
     /// Find the entry index in [`entries()[..upper_bound]`][State::entries()] matching the given repository-relative
@@ -128,7 +275,7 @@ impl State {
             .ok()
     }
 
-    /// Like [`entry_index_by_path_and_stage()`][State::entry_index_by_path_and_stage()],
+    /// Like [`entry_index_by_path_and_stage()`](State::entry_index_by_path_and_stage()),
     /// but returns the entry instead of the index.
     pub fn entry_by_path_and_stage(&self, path: &BStr, stage: entry::Stage) -> Option<&Entry> {
         self.entry_index_by_path_and_stage(path, stage)
@@ -145,7 +292,7 @@ impl State {
             .binary_search_by(|e| {
                 let res = e.path(self).cmp(path);
                 if res.is_eq() {
-                    stage_at_index = e.stage();
+                    stage_at_index = e.stage_raw();
                 }
                 res
             })
@@ -153,37 +300,54 @@ impl State {
         let idx = if stage_at_index == 0 || stage_at_index == 2 {
             idx
         } else {
-            self.entry_index_by_idx_and_stage(path, idx, 2, stage_at_index.cmp(&2))?
+            self.entry_index_by_idx_and_stage(path, idx, Stage::Ours as StageRaw, stage_at_index.cmp(&2))?
         };
         Some(&self.entries[idx])
     }
 
+    /// Return the index at `Ok(index)` where the entry matching `path` (in any stage) can be found, or return
+    /// `Err(index)` to indicate the insertion position at which an entry with `path` would fit in.
+    pub fn entry_index_by_path(&self, path: &BStr) -> Result<usize, usize> {
+        self.entries.binary_search_by(|e| e.path(self).cmp(path))
+    }
+
     /// Return the slice of entries which all share the same `prefix`, or `None` if there isn't a single such entry.
+    ///
+    /// If `prefix` is empty, all entries are returned.
     pub fn prefixed_entries(&self, prefix: &BStr) -> Option<&[Entry]> {
+        self.prefixed_entries_range(prefix).map(|range| &self.entries[range])
+    }
+
+    /// Return the range of entries which all share the same `prefix`, or `None` if there isn't a single such entry.
+    ///
+    /// If `prefix` is empty, the range will include all entries.
+    pub fn prefixed_entries_range(&self, prefix: &BStr) -> Option<Range<usize>> {
         if prefix.is_empty() {
-            return Some(self.entries());
+            return Some(0..self.entries.len());
         }
         let prefix_len = prefix.len();
-        let mut low = self
-            .entries
-            .partition_point(|e| e.path(self).get(..prefix_len).map_or(true, |p| p < prefix));
-        let mut high = low
-            + self.entries[low..].partition_point(|e| e.path(self).get(..prefix_len).map_or(false, |p| p <= prefix));
+        let mut low = self.entries.partition_point(|e| {
+            e.path(self)
+                .get(..prefix_len)
+                .map_or_else(|| e.path(self) <= &prefix[..e.path.len()], |p| p < prefix)
+        });
+        let mut high =
+            low + self.entries[low..].partition_point(|e| e.path(self).get(..prefix_len).is_some_and(|p| p <= prefix));
 
-        let low_entry = &self.entries[low];
-        if low_entry.stage() != 0 {
+        let low_entry = &self.entries.get(low)?;
+        if low_entry.stage_raw() != 0 {
             low = self
-                .entry_index_by_idx_and_stage(low_entry.path(self), low, 0, low_entry.stage().cmp(&0))
+                .walk_entry_stages(low_entry.path(self), low, Ordering::Less)
                 .unwrap_or(low);
         }
         if let Some(high_entry) = self.entries.get(high) {
-            if low_entry.stage() != 2 {
+            if high_entry.stage_raw() != 0 {
                 high = self
-                    .entry_index_by_idx_and_stage(high_entry.path(self), high, 2, high_entry.stage().cmp(&2))
+                    .walk_entry_stages(high_entry.path(self), high, Ordering::Less)
                     .unwrap_or(high);
             }
         }
-        (low != high).then_some(low..high).map(|range| &self.entries[range])
+        (low != high).then_some(low..high)
     }
 
     /// Return the entry at `idx` or _panic_ if the index is out of bounds.
@@ -198,6 +362,48 @@ impl State {
     /// An index is sparse if it contains at least one [`Mode::DIR`][entry::Mode::DIR] entry.
     pub fn is_sparse(&self) -> bool {
         self.is_sparse
+    }
+
+    /// Return the range of entries that exactly match the given `path`, in all available stages, or `None` if no entry with such
+    /// path exists.
+    ///
+    /// The range can be used to access the respective entries via [`entries()`](Self::entries()) or [`entries_mut()](Self::entries_mut()).
+    pub fn entry_range(&self, path: &BStr) -> Option<Range<usize>> {
+        let mut stage_at_index = 0;
+        let idx = self
+            .entries
+            .binary_search_by(|e| {
+                let res = e.path(self).cmp(path);
+                if res.is_eq() {
+                    stage_at_index = e.stage_raw();
+                }
+                res
+            })
+            .ok()?;
+
+        let (start, end) = (
+            self.walk_entry_stages(path, idx, Ordering::Less).unwrap_or(idx),
+            self.walk_entry_stages(path, idx, Ordering::Greater).unwrap_or(idx) + 1,
+        );
+        Some(start..end)
+    }
+}
+
+impl AccelerateLookup<'_> {
+    fn with_capacity(cap: usize) -> Self {
+        let ratio_of_entries_to_dirs_in_webkit = 20; // 400k entries and 20k dirs
+        Self {
+            icase_entries: hashbrown::HashTable::with_capacity(cap),
+            icase_dirs: hashbrown::HashTable::with_capacity(cap / ratio_of_entries_to_dirs_in_webkit),
+        }
+    }
+    fn icase_hash(data: &BStr) -> u64 {
+        use std::hash::Hasher;
+        let mut hasher = fnv::FnvHasher::default();
+        for b in data.as_bytes() {
+            hasher.write_u8(b.to_ascii_lowercase());
+        }
+        hasher.finish()
     }
 }
 
@@ -219,7 +425,7 @@ impl State {
     }
 
     /// Return a writable slice to entries and read-access to their path storage at the same time.
-    pub fn entries_mut_and_pathbacking(&mut self) -> (&mut [Entry], &PathStorage) {
+    pub fn entries_mut_and_pathbacking(&mut self) -> (&mut [Entry], &PathStorageRef) {
         (&mut self.entries, &self.path_backing)
     }
 
@@ -309,6 +515,25 @@ impl State {
                 .then_with(|| compare(a, b))
         });
     }
+
+    /// Physically remove all entries for which `should_remove(idx, path, entry)` returns `true`, traversing them from first to last.
+    ///
+    /// Note that the memory used for the removed entries paths is not freed, as it's append-only.
+    ///
+    /// ### Performance
+    ///
+    /// To implement this operation typically, one would rather add [entry::Flags::REMOVE] to each entry to remove
+    /// them when [writing the index](Self::write_to()).
+    pub fn remove_entries(&mut self, mut should_remove: impl FnMut(usize, &BStr, &mut Entry) -> bool) {
+        let mut index = 0;
+        let paths = &self.path_backing;
+        self.entries.retain_mut(|e| {
+            let path = e.path_in(paths);
+            let res = !should_remove(index, path, e);
+            index += 1;
+            res
+        });
+    }
 }
 
 /// Extensions
@@ -333,6 +558,14 @@ impl State {
     pub fn fs_monitor(&self) -> Option<&extension::FsMonitor> {
         self.fs_monitor.as_ref()
     }
+    /// Return `true` if the end-of-index extension was present when decoding this index.
+    pub fn had_end_of_index_marker(&self) -> bool {
+        self.end_of_index_at_decode_time
+    }
+    /// Return `true` if the offset-table extension was present when decoding this index.
+    pub fn had_offset_table(&self) -> bool {
+        self.offset_table_at_decode_time
+    }
 }
 
 #[cfg(test)]
@@ -344,7 +577,7 @@ mod tests {
         let file = PathBuf::from("tests")
             .join("fixtures")
             .join(Path::new("loose_index").join("conflicting-file.git-index"));
-        let file = crate::File::at(file, gix_hash::Kind::Sha1, Default::default()).expect("valid file");
+        let file = crate::File::at(file, gix_hash::Kind::Sha1, false, Default::default()).expect("valid file");
         assert_eq!(
             file.entries().len(),
             3,

@@ -25,7 +25,7 @@ pub(crate) mod function {
     // TODO: tests for trust-based discovery
     #[cfg_attr(not(unix), allow(unused_variables))]
     pub fn discover_opts(
-        directory: impl AsRef<Path>,
+        directory: &Path,
         Options {
             required_trust,
             ceiling_dirs,
@@ -38,12 +38,19 @@ pub(crate) mod function {
         // Normalize the path so that `Path::parent()` _actually_ gives
         // us the parent directory. (`Path::parent` just strips off the last
         // path component, which means it will not do what you expect when
-        // working with paths paths that contain '..'.)
-        let cwd = current_dir.map_or_else(|| std::env::current_dir().map(Cow::Owned), |cwd| Ok(Cow::Borrowed(cwd)))?;
-        let directory = directory.as_ref();
+        // working with paths that contain '..'.)
+        let cwd = current_dir.map_or_else(
+            || {
+                // The paths we return are relevant to the repository, but at this time it's impossible to know
+                // what `core.precomposeUnicode` is going to be. Hence, the one using these paths will have to
+                // transform the paths as needed, because we can't. `false` means to leave the obtained path as is.
+                gix_fs::current_dir(false).map(Cow::Owned)
+            },
+            |cwd| Ok(Cow::Borrowed(cwd)),
+        )?;
         #[cfg(windows)]
         let directory = dunce::simplified(directory);
-        let dir = gix_path::normalize(directory, cwd.as_ref()).ok_or_else(|| Error::InvalidInput {
+        let dir = gix_path::normalize(directory.into(), cwd.as_ref()).ok_or_else(|| Error::InvalidInput {
             directory: directory.into(),
         })?;
         let dir_metadata = dir.metadata().map_err(|_| Error::InaccessibleDirectory {
@@ -82,7 +89,7 @@ pub(crate) mod function {
         let mut current_height = 0;
         let mut cursor_metadata = Some(dir_metadata);
         'outer: loop {
-            if max_height.map_or(false, |x| current_height > x) {
+            if max_height.is_some_and(|x| current_height > x) {
                 return Err(Error::NoGitRepositoryWithinCeiling {
                     path: dir.into_owned(),
                     ceiling_height: current_height,
@@ -123,7 +130,7 @@ pub(crate) mod function {
                     cursor_metadata_backup = cursor_metadata.take();
                 }
                 if let Ok(kind) = match cursor_metadata.take() {
-                    Some(metadata) => is_git_with_metadata(&cursor, metadata),
+                    Some(metadata) => is_git_with_metadata(&cursor, metadata, &cwd),
                     None => is_git(&cursor),
                 } {
                     match filter_by_trust(&cursor)? {
@@ -135,11 +142,11 @@ pub(crate) mod function {
                                 cursor
                             };
                             break 'outer Ok((
-                                crate::repository::Path::from_dot_git_dir(path, kind, cwd).ok_or_else(|| {
-                                    Error::InvalidInput {
+                                crate::repository::Path::from_dot_git_dir(path, kind, cwd.as_ref()).ok_or_else(
+                                    || Error::InvalidInput {
                                         directory: directory.into(),
-                                    }
-                                })?,
+                                    },
+                                )?,
                                 trust,
                             ));
                         }
@@ -161,7 +168,7 @@ pub(crate) mod function {
                     }
                 }
             }
-            if cursor.parent().map_or(false, |p| p.as_os_str().is_empty()) {
+            if cursor.parent().is_some_and(|p| p.as_os_str().is_empty()) {
                 cursor = cwd.to_path_buf();
                 dir_made_absolute = true;
             }
@@ -177,7 +184,7 @@ pub(crate) mod function {
                     dir_made_absolute = true;
                     debug_assert!(!cursor.as_os_str().is_empty());
                     // TODO: realpath or normalize? No test runs into this.
-                    cursor = gix_path::normalize(&cursor, cwd.as_ref())
+                    cursor = gix_path::normalize(cursor.clone().into(), cwd.as_ref())
                         .ok_or_else(|| Error::InvalidInput {
                             directory: cursor.clone(),
                         })?
@@ -191,7 +198,7 @@ pub(crate) mod function {
     /// the trust level derived from Path ownership.
     ///
     /// Fail if no valid-looking git repository could be found.
-    pub fn discover(directory: impl AsRef<Path>) -> Result<(crate::repository::Path, Trust), Error> {
+    pub fn discover(directory: &Path) -> Result<(crate::repository::Path, Trust), Error> {
         discover_opts(directory, Default::default())
     }
 }

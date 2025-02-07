@@ -1,5 +1,5 @@
 //! a pack data file
-use std::{convert::TryInto, path::Path};
+use std::path::Path;
 
 /// The offset to an entry into the pack data file, relative to its beginning.
 pub type Offset = u64;
@@ -37,9 +37,11 @@ pub mod init {
 pub mod entry;
 
 ///
+#[cfg(feature = "streaming-input")]
 pub mod input;
 
 /// Utilities to encode pack data entries and write them to a `Write` implementation to resemble a pack data file.
+#[cfg(feature = "generate")]
 pub mod output;
 
 /// A slice into a pack file denoting a pack entry.

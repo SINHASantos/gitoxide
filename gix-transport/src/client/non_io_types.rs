@@ -40,6 +40,8 @@ pub(crate) mod connect {
         #[cfg(feature = "blocking-client")]
         /// Options to use if the scheme of the URL is `ssh`.
         pub ssh: crate::client::ssh::connect::Options,
+        /// If `true`, all packetlines received or sent will be passed to the facilities of the `gix-trace` crate.
+        pub trace: bool,
     }
 
     /// The error used in [`connect()`][crate::connect()].
@@ -110,6 +112,8 @@ mod error {
     #[derive(thiserror::Error, Debug)]
     #[allow(missing_docs)]
     pub enum Error {
+        #[error("A request was performed without performing the handshake first")]
+        MissingHandshake,
         #[error("An IO error occurred when talking to the server")]
         Io(#[from] std::io::Error),
         #[error("Capabilities could not be parsed")]
@@ -138,6 +142,8 @@ mod error {
         Http(#[from] HttpError),
         #[error(transparent)]
         SshInvocation(SshInvocationError),
+        #[error("The repository path '{path}' could be mistaken for a command-line argument")]
+        AmbiguousPath { path: BString },
     }
 
     impl crate::IsSpuriousError for Error {

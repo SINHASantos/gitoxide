@@ -4,9 +4,8 @@ use gix_date::{
     time::{format, Format},
     SecondsSinceUnixEpoch,
 };
+use gix_testtools::Result;
 use once_cell::sync::Lazy;
-
-type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 struct Sample {
     format_name: Option<String>,

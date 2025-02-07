@@ -60,11 +60,14 @@ impl Server {
         stdin: std::io::Stdin,
         stdout: std::io::Stdout,
         welcome_prefix: &str,
-        pick_version: impl FnOnce(&[usize]) -> Option<usize>,
+        pick_version: &mut dyn FnMut(&[usize]) -> Option<usize>,
         available_capabilities: &[&str],
     ) -> Result<Self, handshake::Error> {
-        let mut input =
-            gix_packetline::StreamingPeekableIter::new(stdin.lock(), &[gix_packetline::PacketLineRef::Flush]);
+        let mut input = gix_packetline::StreamingPeekableIter::new(
+            stdin.lock(),
+            &[gix_packetline::PacketLineRef::Flush],
+            false, /* packet tracing */
+        );
         let mut read = input.as_read();
         let mut buf = String::new();
         read.read_line_to_string(&mut buf)?;
@@ -189,7 +192,7 @@ impl Server {
                     actual: line.into(),
                 })?;
             assert!(tokens.next().is_none(), "configured to yield at most two tokens");
-            meta.push((key.as_bstr().to_string(), value.into()))
+            meta.push((key.as_bstr().to_string(), value.into()));
         }
 
         drop(read);

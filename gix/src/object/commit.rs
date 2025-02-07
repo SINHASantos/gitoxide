@@ -1,4 +1,4 @@
-use crate::{bstr, bstr::BStr, revision, Commit, ObjectDetached, Tree};
+use crate::{bstr, bstr::BStr, Commit, ObjectDetached, Tree};
 
 mod error {
     use crate::object;
@@ -20,7 +20,8 @@ mod error {
 
 pub use error::Error;
 
-impl<'repo> Commit<'repo> {
+/// Remove Lifetime
+impl Commit<'_> {
     /// Create an owned instance of this object, copying our data in the process.
     pub fn detached(&self) -> ObjectDetached {
         ObjectDetached {
@@ -33,6 +34,13 @@ impl<'repo> Commit<'repo> {
     /// Sever the connection to the `Repository` and turn this instance into a standalone object.
     pub fn detach(self) -> ObjectDetached {
         self.into()
+    }
+
+    /// Retrieve this instance's encoded data, leaving its own data empty.
+    ///
+    /// This method works around the immovability of members of this type.
+    pub fn take_data(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.data)
     }
 }
 
@@ -131,12 +139,13 @@ impl<'repo> Commit<'repo> {
     }
 
     /// Obtain a platform for traversing ancestors of this commit.
-    pub fn ancestors(&self) -> revision::walk::Platform<'repo> {
+    pub fn ancestors(&self) -> crate::revision::walk::Platform<'repo> {
         self.id().ancestors()
     }
 
     /// Create a platform to further configure a `git describe` operation to find a name for this commit by looking
     /// at the closest annotated tags (by default) in its past.
+    #[cfg(feature = "revision")]
     pub fn describe(&self) -> crate::commit::describe::Platform<'repo> {
         crate::commit::describe::Platform {
             id: self.id,
@@ -158,7 +167,7 @@ impl<'repo> Commit<'repo> {
     }
 }
 
-impl<'r> std::fmt::Debug for Commit<'r> {
+impl std::fmt::Debug for Commit<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Commit({})", self.id)
     }

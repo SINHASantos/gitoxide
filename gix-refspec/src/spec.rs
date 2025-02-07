@@ -41,13 +41,13 @@ mod impls {
 
     impl Hash for RefSpec {
         fn hash<H: Hasher>(&self, state: &mut H) {
-            self.to_ref().hash(state)
+            self.to_ref().hash(state);
         }
     }
 
     impl Hash for RefSpecRef<'_> {
         fn hash<H: Hasher>(&self, state: &mut H) {
-            self.instruction().hash(state)
+            self.instruction().hash(state);
         }
     }
 
@@ -65,13 +65,13 @@ mod impls {
 
     impl PartialOrd for RefSpecRef<'_> {
         fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            self.instruction().partial_cmp(&other.instruction())
+            Some(self.cmp(other))
         }
     }
 
     impl PartialOrd for RefSpec {
         fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            self.to_ref().partial_cmp(&other.to_ref())
+            Some(self.to_ref().cmp(&other.to_ref()))
         }
     }
 

@@ -23,6 +23,9 @@ pub struct Arguments {
     features_for_first_want: Option<Vec<String>>,
     #[cfg(any(feature = "async-client", feature = "blocking-client"))]
     version: gix_transport::Protocol,
+
+    #[cfg(any(feature = "async-client", feature = "blocking-client"))]
+    trace: bool,
 }
 
 impl Arguments {
@@ -162,6 +165,7 @@ impl Arguments {
     /// Permanently allow the server to include tags that point to commits or objects it would return.
     ///
     /// Needs to only be called once.
+    #[cfg(any(feature = "async-client", feature = "blocking-client"))]
     pub fn use_include_tag(&mut self) {
         debug_assert!(self.supports_include_tag, "'include-tag' feature required");
         if self.supports_include_tag {
@@ -174,6 +178,7 @@ impl Arguments {
     /// Note that sending an unknown or unsupported feature may cause the remote to terminate
     /// the connection. Use this method if you know what you are doing *and* there is no specialized
     /// method for this, e.g. [`Self::use_include_tag()`].
+    #[cfg(any(feature = "async-client", feature = "blocking-client"))]
     pub fn add_feature(&mut self, feature: &str) {
         match self.version {
             gix_transport::Protocol::V0 | gix_transport::Protocol::V1 => {
@@ -181,7 +186,7 @@ impl Arguments {
                     .features_for_first_want
                     .as_mut()
                     .expect("call add_feature before first want()");
-                features.push(feature.into())
+                features.push(feature.into());
             }
             gix_transport::Protocol::V2 => {
                 self.args.push(feature.into());
@@ -194,8 +199,9 @@ impl Arguments {
     }
     /// Create a new instance to help setting up arguments to send to the server as part of a `fetch` operation
     /// for which `features` are the available and configured features to use.
+    /// If `trace` is `true`, all packetlines received or sent will be passed to the facilities of the `gix-trace` crate.
     #[cfg(any(feature = "async-client", feature = "blocking-client"))]
-    pub fn new(version: gix_transport::Protocol, features: Vec<crate::command::Feature>) -> Self {
+    pub fn new(version: gix_transport::Protocol, features: Vec<crate::command::Feature>, trace: bool) -> Self {
         use crate::Command;
         let has = |name: &str| features.iter().any(|f| f.0 == name);
         let filter = has("filter");
@@ -225,7 +231,7 @@ impl Arguments {
             }
             gix_transport::Protocol::V2 => {
                 supports_include_tag = true;
-                (Command::Fetch.initial_arguments(&features), None)
+                (Command::Fetch.initial_v2_arguments(&features), None)
             }
         };
 
@@ -242,6 +248,7 @@ impl Arguments {
             ref_in_want,
             deepen_since,
             features_for_first_want,
+            trace,
         }
     }
 }

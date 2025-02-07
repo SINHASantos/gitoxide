@@ -1,9 +1,9 @@
 use bstr::{BStr, ByteSlice};
-use gix_odb::FindExt;
+use gix_index::entry::Mode;
 use gix_worktree::{stack::state::ignore::Source, Stack};
+use std::fs::Metadata;
 
-use crate::hex_to_id;
-use crate::worktree::stack::probe_case;
+use crate::{hex_to_id, worktree::stack::probe_case};
 
 struct IgnoreExpectations<'a> {
     lines: bstr::Lines<'a>,
@@ -51,16 +51,22 @@ fn exclude_by_dir_is_handled_just_like_git() {
     let expectations = IgnoreExpectations {
         lines: baseline.lines(),
     };
+    struct FindError;
+    impl gix_object::Find for FindError {
+        fn try_find<'a>(
+            &self,
+            _id: &gix_hash::oid,
+            _buffer: &'a mut Vec<u8>,
+        ) -> Result<Option<gix_object::Data<'a>>, gix_object::find::Error> {
+            Err(std::io::Error::new(std::io::ErrorKind::Other, "unreachable").into())
+        }
+    }
     for (relative_entry, source_and_line) in expectations {
         let (source, line, expected_pattern) = source_and_line.expect("every value is matched");
         let relative_path = gix_path::from_byte_slice(relative_entry);
-        let is_dir = dir.join(relative_path).metadata().ok().map(|m| m.is_dir());
+        let is_dir = dir.join(relative_path).metadata().ok().map(metadata_to_mode);
 
-        let platform = cache
-            .at_entry(relative_entry, is_dir, |_oid, _buf| {
-                Err(std::io::Error::new(std::io::ErrorKind::Other, "unreachable"))
-            })
-            .unwrap();
+        let platform = cache.at_entry(relative_entry, is_dir, &FindError).unwrap();
         let match_ = platform.matching_exclude_pattern().expect("match all values");
         let _is_excluded = platform.is_excluded();
         assert_eq!(
@@ -72,8 +78,22 @@ fn exclude_by_dir_is_handled_just_like_git() {
             expected_pattern, "tld/",
             "each entry matches on the main directory exclude, ignoring negations entirely"
         );
+        // TODO: adjust baseline to also include precious files.
+        assert_eq!(
+            match_.kind,
+            gix_ignore::Kind::Expendable,
+            "for now all patterns are expendable until precious files are supported by git"
+        );
         assert_eq!(line, 2);
         assert_eq!(source, ".gitignore");
+    }
+}
+
+fn metadata_to_mode(meta: Metadata) -> Mode {
+    if meta.is_dir() {
+        gix_index::entry::Mode::DIR
+    } else {
+        gix_index::entry::Mode::FILE
     }
 }
 
@@ -89,12 +109,12 @@ fn check_against_baseline() -> crate::Result {
     // Due to the way our setup differs from gits dynamic stack (which involves trying to read files from disk
     // by path) we can only test one case baseline, so we require multiple platforms (or filesystems) to run this.
     let case = probe_case()?;
-    let mut index = gix_index::File::at(git_dir.join("index"), gix_hash::Kind::Sha1, Default::default())?;
+    let mut index = gix_index::File::at(git_dir.join("index"), gix_hash::Kind::Sha1, false, Default::default())?;
     let odb = gix_odb::at(git_dir.join("objects"))?;
     let state = gix_worktree::stack::State::for_add(
         Default::default(),
         gix_worktree::stack::state::Ignore::new(
-            gix_ignore::Search::from_overrides(vec!["!force-include"]),
+            gix_ignore::Search::from_overrides(["!force-include"]),
             gix_ignore::Search::from_git_dir(&git_dir, Some(user_exclude_path), &mut buf)?,
             None,
             Source::WorktreeThenIdMappingIfNotSkipped,
@@ -117,9 +137,9 @@ fn check_against_baseline() -> crate::Result {
     };
     for (relative_entry, source_and_line) in expectations {
         let relative_path = gix_path::from_byte_slice(relative_entry);
-        let is_dir = worktree_dir.join(relative_path).metadata().ok().map(|m| m.is_dir());
+        let is_dir = worktree_dir.join(relative_path).metadata().ok().map(metadata_to_mode);
 
-        let platform = cache.at_entry(relative_entry, is_dir, |oid, buf| odb.find_blob(oid, buf))?;
+        let platform = cache.at_entry(relative_entry, is_dir, &odb)?;
 
         let match_ = platform.matching_exclude_pattern();
         let is_excluded = platform.is_excluded();
@@ -130,8 +150,16 @@ fn check_against_baseline() -> crate::Result {
             (Some(m), Some((source_file, line, pattern))) => {
                 assert_eq!(m.pattern.to_string(), pattern);
                 assert_eq!(m.sequence_number, line);
+                // TODO: adjust baseline to also include precious files.
+                if !m.pattern.is_negative() {
+                    assert_eq!(
+                        m.kind,
+                        platform.excluded_kind().expect("it matches"),
+                        "both values agree, no matter which method is used"
+                    );
+                }
                 // Paths read from the index are relative to the repo, and they don't exist locally due tot skip-worktree
-                if m.source.map_or(false, std::path::Path::exists) {
+                if m.source.is_some_and(std::path::Path::exists) {
                     assert_eq!(
                         m.source.map(|p| p.canonicalize().unwrap()),
                         Some(worktree_dir.join(source_file.to_str_lossy().as_ref()).canonicalize()?)

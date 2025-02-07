@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -eu -o pipefail
 
 function tick () {
@@ -22,7 +22,7 @@ GIT_COMMITTER_EMAIL=committer@example.com
 GIT_COMMITTER_NAME='C O Mitter'
 GIT_COMMITTER_DATE='1112354055 +0200'
 
-# runup to the correct count for ambigous commits
+# runup to the correct count for ambiguous commits
 tick; tick; tick; tick; tick
 
 git init base
@@ -114,6 +114,11 @@ git clone --shared --depth 2 file://$PWD/base base.shallow
 git clone --shared base clone
 (cd clone
   git remote add myself .
+)
+
+git clone --shared base head-ref
+(cd head-ref
+  git rev-parse @ > .git/refs/heads/HEAD
 )
 
 git clone --no-tags --shared base clone-no-tags
@@ -363,10 +368,16 @@ git init one-commit-with-symref
   touch content && git add content && git commit -m "init"
   git checkout -b branch
   git symbolic-ref refs/heads/symbolic refs/heads/branch
+  git symbolic-ref refs/heads/unborn refs/heads/non-existing
   git checkout main
 )
 
 git clone one-commit-with-symref one-commit-with-symref-missing-branch
 (cd one-commit-with-symref-missing-branch
   git branch valid-locally
+)
+
+git init empty-core-askpass
+(cd empty-core-askpass
+  echo "    askpass =" >> .git/config
 )

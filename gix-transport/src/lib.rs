@@ -4,10 +4,10 @@
 //! All git transports are supported, including `ssh`, `git`, `http` and `https`, as well as local repository paths.
 //! ## Feature Flags
 #![cfg_attr(
-    feature = "document-features",
-    cfg_attr(doc, doc = ::document_features::document_features!())
+    all(doc, feature = "document-features"),
+    doc = ::document_features::document_features!()
 )]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(all(doc, feature = "document-features"), feature(doc_cfg, doc_auto_cfg))]
 #![deny(missing_docs, rust_2018_idioms)]
 #![forbid(unsafe_code)]
 
@@ -21,7 +21,6 @@ pub use gix_packetline as packetline;
 /// The version of the way client and server communicate.
 #[derive(Default, PartialEq, Eq, Debug, Hash, Ord, PartialOrd, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[allow(missing_docs)]
 pub enum Protocol {
     /// Version 0 is like V1, but doesn't show capabilities at all, at least when hosted without `git-daemon`.
     V0 = 0,

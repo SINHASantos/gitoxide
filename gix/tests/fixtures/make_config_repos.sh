@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -eu -o pipefail
 
 git init http-config
@@ -163,4 +163,37 @@ mkdir not-a-repo-empty-dir;
 mkdir not-a-repo-with-files;
 (cd not-a-repo-with-files
   touch this that
+)
+
+git init ssl-verify-disabled
+(cd ssl-verify-disabled
+  git config http.sslVerify false
+)
+
+git init ssl-no-verify-enabled
+(cd ssl-no-verify-enabled
+  git config http.sslVerify true
+  git config gitoxide.http.sslNoVerify true
+)
+
+
+git init --bare with-hasconfig
+(cd with-hasconfig
+  cat >include-with-url <<-\EOF
+  [user]
+    name = "works"
+    email = "works@example.com"
+EOF
+  cat >system.config <<-\EOF
+  [includeIf "hasconfig:remote.*.url:anyurl"]
+    path = "include-with-url"
+EOF
+
+  echo $'[remote "any"]\n\turl=anyurl' >>config
+
+)
+
+git init big-file-threshold
+(cd big-file-threshold
+  git config core.bigFileThreshold 42
 )

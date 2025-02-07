@@ -31,6 +31,7 @@ pub(crate) mod root {
         /// The `credential` section.
         pub const CREDENTIAL: sections::Credential = sections::Credential;
         /// The `diff` section.
+        #[cfg(feature = "blob-diff")]
         pub const DIFF: sections::Diff = sections::Diff;
         /// The `extensions` section.
         pub const EXTENSIONS: sections::Extensions = sections::Extensions;
@@ -44,16 +45,25 @@ pub(crate) mod root {
         pub const INDEX: sections::Index = sections::Index;
         /// The `init` section.
         pub const INIT: sections::Init = sections::Init;
+        /// The `mailmap` section.
+        pub const MAILMAP: sections::Mailmap = sections::Mailmap;
+        /// The `merge` section.
+        pub const MERGE: sections::Merge = sections::Merge;
         /// The `pack` section.
         pub const PACK: sections::Pack = sections::Pack;
         /// The `protocol` section.
         pub const PROTOCOL: sections::Protocol = sections::Protocol;
+        /// The `push` section.
+        pub const PUSH: sections::Push = sections::Push;
         /// The `remote` section.
         pub const REMOTE: sections::Remote = sections::Remote;
         /// The `safe` section.
         pub const SAFE: sections::Safe = sections::Safe;
         /// The `ssh` section.
         pub const SSH: sections::Ssh = sections::Ssh;
+        /// The `status` section.
+        #[cfg(feature = "status")]
+        pub const STATUS: sections::Status = sections::Status;
         /// The `user` section.
         pub const USER: sections::User = sections::User;
         /// The `url` section.
@@ -69,6 +79,7 @@ pub(crate) mod root {
                 &Self::COMMITTER,
                 &Self::CORE,
                 &Self::CREDENTIAL,
+                #[cfg(feature = "blob-diff")]
                 &Self::DIFF,
                 &Self::EXTENSIONS,
                 &Self::FETCH,
@@ -76,11 +87,16 @@ pub(crate) mod root {
                 &Self::HTTP,
                 &Self::INDEX,
                 &Self::INIT,
+                &Self::MAILMAP,
+                &Self::MERGE,
                 &Self::PACK,
                 &Self::PROTOCOL,
+                &Self::PUSH,
                 &Self::REMOTE,
                 &Self::SAFE,
                 &Self::SSH,
+                #[cfg(feature = "status")]
+                &Self::STATUS,
                 &Self::USER,
                 &Self::URL,
             ]
@@ -90,10 +106,14 @@ pub(crate) mod root {
 
 mod sections;
 pub use sections::{
-    branch, checkout, core, credential, diff, extensions, fetch, gitoxide, http, index, protocol, remote, ssh, Author,
-    Branch, Checkout, Clone, Committer, Core, Credential, Diff, Extensions, Fetch, Gitoxide, Http, Index, Init, Pack,
-    Protocol, Remote, Safe, Ssh, Url, User,
+    branch, checkout, core, credential, extensions, fetch, gitoxide, http, index, protocol, push, remote, ssh, Author,
+    Branch, Checkout, Clone, Committer, Core, Credential, Extensions, Fetch, Gitoxide, Http, Index, Init, Mailmap,
+    Merge, Pack, Protocol, Push, Remote, Safe, Ssh, Url, User,
 };
+#[cfg(feature = "blob-diff")]
+pub use sections::{diff, Diff};
+#[cfg(feature = "status")]
+pub use sections::{status, Status};
 
 /// Generic value implementations for static instantiation.
 pub mod keys;

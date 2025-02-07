@@ -1,6 +1,5 @@
 use std::{
     borrow::Borrow,
-    convert::TryInto,
     hash::{Hash, Hasher},
     ops::Deref,
 };
@@ -24,7 +23,7 @@ pub enum ObjectId {
 #[allow(clippy::derived_hash_with_manual_eq)]
 impl Hash for ObjectId {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write(self.as_slice())
+        state.write(self.as_slice());
     }
 }
 
@@ -55,7 +54,7 @@ pub mod decode {
                     ObjectId::Sha1({
                         let mut buf = [0; 20];
                         faster_hex::hex_decode(buffer, &mut buf).map_err(|err| match err {
-                            faster_hex::Error::InvalidChar => Error::Invalid,
+                            faster_hex::Error::InvalidChar | faster_hex::Error::Overflow => Error::Invalid,
                             faster_hex::Error::InvalidLength(_) => {
                                 unreachable!("BUG: This is already checked")
                             }
@@ -123,6 +122,7 @@ impl ObjectId {
 
     /// Returns an instances whose bytes are all zero.
     #[inline]
+    #[doc(alias = "zero", alias = "git2")]
     pub const fn null(kind: Kind) -> ObjectId {
         match kind {
             Kind::Sha1 => Self::null_sha1(),
@@ -131,6 +131,7 @@ impl ObjectId {
 
     /// Returns `true` if this hash consists of all null bytes.
     #[inline]
+    #[doc(alias = "is_zero", alias = "git2")]
     pub fn is_null(&self) -> bool {
         match self {
             ObjectId::Sha1(digest) => &digest[..] == oid::null_sha1().as_bytes(),
@@ -147,6 +148,19 @@ impl ObjectId {
     #[inline]
     pub fn is_empty_tree(&self) -> bool {
         self == &Self::empty_tree(self.kind())
+    }
+}
+
+/// Lifecycle
+impl ObjectId {
+    /// Convert `bytes` into an owned object Id or panic if the slice length doesn't indicate a supported hash.
+    ///
+    /// Use `Self::try_from(bytes)` for a fallible version.
+    pub fn from_bytes_or_panic(bytes: &[u8]) -> Self {
+        match bytes.len() {
+            20 => Self::Sha1(bytes.try_into().expect("prior length validation")),
+            other => panic!("BUG: unsupported hash len: {other}"),
+        }
     }
 }
 
@@ -193,20 +207,19 @@ impl From<[u8; SIZE_OF_SHA1_DIGEST]> for ObjectId {
     }
 }
 
-impl From<&[u8]> for ObjectId {
-    fn from(v: &[u8]) -> Self {
-        match v.len() {
-            20 => Self::Sha1(v.try_into().expect("prior length validation")),
-            other => panic!("BUG: unsupported hash len: {other}"),
-        }
-    }
-}
-
 impl From<&oid> for ObjectId {
     fn from(v: &oid) -> Self {
         match v.kind() {
             Kind::Sha1 => ObjectId::from_20_bytes(v.as_bytes()),
         }
+    }
+}
+
+impl TryFrom<&[u8]> for ObjectId {
+    type Error = crate::Error;
+
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        Ok(oid::try_from_bytes(bytes)?.into())
     }
 }
 

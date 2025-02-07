@@ -1,4 +1,4 @@
-use std::{borrow::Cow, convert::TryFrom, fmt::Display, str::FromStr};
+use std::{borrow::Cow, fmt::Display, str::FromStr};
 
 use bstr::{BStr, BString};
 
@@ -64,6 +64,11 @@ impl TryFrom<&BStr> for Integer {
         }
 
         if s.len() <= 1 {
+            return Err(int_err(s));
+        }
+
+        let last_idx = s.len() - 1;
+        if !s.is_char_boundary(last_idx) {
             return Err(int_err(s));
         }
 

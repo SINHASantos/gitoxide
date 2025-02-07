@@ -8,7 +8,7 @@ use clap::Parser;
 use gix::{
     bstr::{BString, ByteSlice},
     date::time::format,
-    traverse::commit::Sorting,
+    revision::walk::Sorting,
 };
 
 fn main() {
@@ -20,7 +20,7 @@ fn main() {
 }
 
 #[derive(Debug, clap::Parser)]
-#[clap(name = "log", about = "git log example", version = option_env!("GITOXIDE_VERSION"))]
+#[clap(name = "log", about = "git log example", version = option_env!("GIX_VERSION"))]
 struct Args {
     /// Alternative git directory to use
     #[clap(name = "dir", long = "git-dir")]
@@ -79,7 +79,7 @@ fn run(args: Args) -> anyhow::Result<()> {
         Sorting::BreadthFirst
     } else {
         // else if args.newest_first {
-        Sorting::ByCommitTimeNewestFirst
+        Sorting::ByCommitTime(Default::default())
     };
 
     let mut min_parents = args.min_parents.unwrap_or(0);
@@ -158,7 +158,7 @@ fn run(args: Args) -> anyhow::Result<()> {
     if args.reverse {
         let mut results: Vec<_> = log_iter.collect();
         results.reverse();
-        log_iter = Box::new(results.into_iter())
+        log_iter = Box::new(results.into_iter());
     }
 
     let mut log_iter = log_iter

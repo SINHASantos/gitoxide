@@ -26,11 +26,11 @@ impl Outcome {
             for (order, macro_attributes) in collection.iter().filter_map(|(_, meta)| {
                 (!meta.macro_attributes.is_empty()).then_some((meta.id.0, &meta.macro_attributes))
             }) {
-                self.matches_by_id[order].macro_attributes = macro_attributes.clone()
+                self.matches_by_id[order].macro_attributes.clone_from(macro_attributes);
             }
 
             for (name, id) in self.selected.iter_mut().filter(|(_, id)| id.is_none()) {
-                *id = collection.name_to_meta.get(name.as_str()).map(|meta| meta.id)
+                *id = collection.name_to_meta.get(name.as_str()).map(|meta| meta.id);
             }
         }
         self.reset();
@@ -46,16 +46,23 @@ impl Outcome {
         collection: &MetadataCollection,
         attribute_names: impl IntoIterator<Item = impl Into<KStringRef<'a>>>,
     ) {
-        self.initialize(collection);
+        self.initialize_with_selection_inner(collection, &mut attribute_names.into_iter().map(Into::into));
+    }
 
+    fn initialize_with_selection_inner(
+        &mut self,
+        collection: &MetadataCollection,
+        attribute_names: &mut dyn Iterator<Item = KStringRef<'_>>,
+    ) {
         self.selected.clear();
-        self.selected.extend(attribute_names.into_iter().map(|name| {
-            let name = name.into();
+        self.selected.extend(attribute_names.map(|name| {
             (
                 name.to_owned(),
                 collection.name_to_meta.get(name.as_str()).map(|meta| meta.id),
             )
         }));
+
+        self.initialize(collection);
         self.reset_remaining();
     }
 
@@ -81,7 +88,7 @@ impl Outcome {
     /// Note that it's safe to call it multiple times, so that it can be called after this instance was used to store a search result.
     pub fn copy_into(&self, collection: &MetadataCollection, dest: &mut Self) {
         dest.initialize(collection);
-        dest.matches_by_id = self.matches_by_id.clone();
+        dest.matches_by_id.clone_from(&self.matches_by_id);
         if dest.patterns.len() != self.patterns.len() {
             dest.patterns = self.patterns.clone();
         }
@@ -169,12 +176,11 @@ impl Outcome {
         source: Option<&std::path::PathBuf>,
         sequence_number: usize,
     ) -> bool {
-        self.attrs_stack.extend(attrs.filter_map(|attr| {
-            self.matches_by_id[attr.id.0]
-                .r#match
-                .is_none()
-                .then(|| (attr.id, attr.inner.clone(), None))
-        }));
+        self.attrs_stack.extend(
+            attrs
+                .filter(|attr| self.matches_by_id[attr.id.0].r#match.is_none())
+                .map(|attr| (attr.id, attr.inner.clone(), None)),
+        );
         while let Some((id, assignment, parent_order)) = self.attrs_stack.pop() {
             let slot = &mut self.matches_by_id[id.0];
             if slot.r#match.is_some() {
@@ -205,12 +211,12 @@ impl Outcome {
             if is_macro {
                 // TODO(borrowchk): one fine day we should be able to re-borrow `slot` without having to redo the array access.
                 let slot = &self.matches_by_id[id.0];
-                self.attrs_stack.extend(slot.macro_attributes.iter().filter_map(|attr| {
-                    self.matches_by_id[attr.id.0]
-                        .r#match
-                        .is_none()
-                        .then(|| (attr.id, attr.inner.clone(), Some(id)))
-                }));
+                self.attrs_stack.extend(
+                    slot.macro_attributes
+                        .iter()
+                        .filter(|attr| self.matches_by_id[attr.id.0].r#match.is_none())
+                        .map(|attr| (attr.id, attr.inner.clone(), Some(id))),
+                );
             }
         }
         false
@@ -319,7 +325,11 @@ impl MetadataCollection {
         };
 
         self.assign_order_to_attributes(attrs);
-        self.name_to_meta.get_mut(name).expect("just added").macro_attributes = attrs.clone();
+        self.name_to_meta
+            .get_mut(name)
+            .expect("just added")
+            .macro_attributes
+            .clone_from(attrs);
 
         order
     }

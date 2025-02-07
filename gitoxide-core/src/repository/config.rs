@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use gix::bstr::{BStr, BString};
+use gix::{bstr::BString, config::AsKey};
 
 use crate::OutputFormat;
 
@@ -32,7 +32,7 @@ pub fn list(
         }
 
         let meta = section.meta();
-        if last_meta.map_or(true, |last| last != meta) {
+        if last_meta != Some(meta) {
             write_meta(meta, &mut out)?;
         }
         last_meta = Some(meta);
@@ -41,9 +41,10 @@ pub fn list(
         for event in matter {
             event.write_to(&mut out)?;
         }
-        if it.peek().map_or(false, |(next_section, _)| {
-            next_section.header().name() != section.header().name()
-        }) {
+        if it
+            .peek()
+            .is_some_and(|(next_section, _)| next_section.header().name() != section.header().name())
+        {
             writeln!(&mut out)?;
         }
     }
@@ -57,7 +58,7 @@ struct Filter {
 
 impl Filter {
     fn new(input: BString) -> Self {
-        match gix::config::parse::key(<_ as AsRef<BStr>>::as_ref(&input)) {
+        match input.try_as_key() {
             Some(key) => Filter {
                 name: key.section_name.into(),
                 subsection: key.subsection_name.map(ToOwned::to_owned),

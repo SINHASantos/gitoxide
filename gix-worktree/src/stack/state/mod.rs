@@ -1,15 +1,15 @@
-use std::path::PathBuf;
-
 use bstr::{BString, ByteSlice};
 use gix_glob::pattern::Case;
 
 use crate::{stack::State, PathIdMapping};
 
+#[cfg(feature = "attributes")]
 type AttributeMatchGroup = gix_attributes::Search;
 type IgnoreMatchGroup = gix_ignore::Search;
 
 /// State related to attributes associated with files in the repository.
 #[derive(Default, Clone)]
+#[cfg(feature = "attributes")]
 pub struct Attributes {
     /// Attribute patterns which aren't tied to the repository root, hence are global, they contribute first.
     globals: AttributeMatchGroup,
@@ -20,7 +20,7 @@ pub struct Attributes {
     stack: AttributeMatchGroup,
     /// The first time we push the root, we have to load additional information from this file if it exists along with the root attributes
     /// file if possible, and keep them there throughout.
-    info_attributes: Option<PathBuf>,
+    info_attributes: Option<std::path::PathBuf>,
     /// A lookup table to accelerate searches.
     collection: gix_attributes::search::MetadataCollection,
     /// Where to read `.gitattributes` data from.
@@ -50,6 +50,7 @@ pub struct Ignore {
 }
 
 ///
+#[cfg(feature = "attributes")]
 pub mod attributes;
 ///
 pub mod ignore;
@@ -57,21 +58,23 @@ pub mod ignore;
 /// Initialization
 impl State {
     /// Configure a state to be suitable for checking out files, which only needs access to attribute files read from the index.
-    pub fn for_checkout(unlink_on_collision: bool, attributes: Attributes) -> Self {
+    #[cfg(feature = "attributes")]
+    pub fn for_checkout(
+        unlink_on_collision: bool,
+        validate: gix_validate::path::component::Options,
+        attributes: Attributes,
+    ) -> Self {
         State::CreateDirectoryAndAttributesStack {
             unlink_on_collision,
+            validate,
             attributes,
         }
     }
 
     /// Configure a state for adding files, with support for ignore files and attribute files.
+    #[cfg(feature = "attributes")]
     pub fn for_add(attributes: Attributes, ignore: Ignore) -> Self {
         State::AttributesAndIgnoreStack { attributes, ignore }
-    }
-
-    /// Configure a state for status retrieval, which needs access to ignore files only.
-    pub fn for_status(ignore: Ignore) -> Self {
-        State::IgnoreStack(ignore)
     }
 }
 
@@ -96,6 +99,7 @@ impl State {
         case: Case,
     ) -> Vec<PathIdMapping> {
         let a1_backing;
+        #[cfg(feature = "attributes")]
         let a2_backing;
         let names = match self {
             State::IgnoreStack(ignore) => {
@@ -105,6 +109,7 @@ impl State {
                 )];
                 a1_backing.as_ref()
             }
+            #[cfg(feature = "attributes")]
             State::AttributesAndIgnoreStack { ignore, .. } => {
                 a2_backing = [
                     (
@@ -115,6 +120,7 @@ impl State {
                 ];
                 a2_backing.as_ref()
             }
+            #[cfg(feature = "attributes")]
             State::CreateDirectoryAndAttributesStack { .. } | State::AttributesStack(_) => {
                 a1_backing = [(".gitattributes".into(), None)];
                 a1_backing.as_ref()
@@ -129,7 +135,7 @@ impl State {
 
                 // Stage 0 means there is no merge going on, stage 2 means it's 'our' side of the merge, but then
                 // there won't be a stage 0.
-                if entry.mode == gix_index::entry::Mode::FILE && (entry.stage() == 0 || entry.stage() == 2) {
+                if entry.mode == gix_index::entry::Mode::FILE && (entry.stage_raw() == 0 || entry.stage_raw() == 2) {
                     let basename = path.rfind_byte(b'/').map_or(path, |pos| path[pos + 1..].as_bstr());
                     let ignore_source = names.iter().find_map(|t| {
                         match case {
@@ -160,13 +166,16 @@ impl State {
     pub(crate) fn ignore_or_panic(&self) -> &Ignore {
         match self {
             State::IgnoreStack(v) => v,
+            #[cfg(feature = "attributes")]
             State::AttributesAndIgnoreStack { ignore, .. } => ignore,
+            #[cfg(feature = "attributes")]
             State::AttributesStack(_) | State::CreateDirectoryAndAttributesStack { .. } => {
                 unreachable!("BUG: must not try to check excludes without it being setup")
             }
         }
     }
 
+    #[cfg(feature = "attributes")]
     pub(crate) fn attributes_or_panic(&self) -> &Attributes {
         match self {
             State::AttributesStack(attributes)

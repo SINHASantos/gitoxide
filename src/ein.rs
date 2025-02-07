@@ -1,12 +1,7 @@
 #![deny(rust_2018_idioms, unsafe_code)]
 
-mod porcelain;
-mod shared;
-
-use anyhow::Result;
-
-fn main() -> Result<()> {
-    porcelain::main()
+fn main() -> anyhow::Result<()> {
+    gitoxide::porcelain::main()
 }
 
 #[cfg(not(feature = "pretty-cli"))]

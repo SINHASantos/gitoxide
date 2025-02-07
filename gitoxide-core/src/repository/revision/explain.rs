@@ -55,7 +55,7 @@ impl<'a> Explain<'a> {
     }
 }
 
-impl<'a> delegate::Revision for Explain<'a> {
+impl delegate::Revision for Explain<'_> {
     fn find_ref(&mut self, name: &BStr) -> Option<()> {
         self.prefix()?;
         self.ref_name = Some(name.into());
@@ -121,7 +121,7 @@ impl<'a> delegate::Revision for Explain<'a> {
     }
 }
 
-impl<'a> delegate::Navigate for Explain<'a> {
+impl delegate::Navigate for Explain<'_> {
     fn traverse(&mut self, kind: Traversal) -> Option<()> {
         self.prefix()?;
         let name = self.revision_name();
@@ -129,8 +129,8 @@ impl<'a> delegate::Navigate for Explain<'a> {
             self.out,
             "{}",
             match kind {
-                Traversal::NthAncestor(no) => format!("Traverse to the {no}th ancestor of revision named '{name}'"),
-                Traversal::NthParent(no) => format!("Select the {no}th parent of revision named '{name}'"),
+                Traversal::NthAncestor(no) => format!("Traverse to the {no}. ancestor of revision named '{name}'"),
+                Traversal::NthParent(no) => format!("Select the {no}. parent of revision named '{name}'"),
             }
         )
         .ok()
@@ -194,7 +194,7 @@ impl<'a> delegate::Navigate for Explain<'a> {
     }
 }
 
-impl<'a> delegate::Kind for Explain<'a> {
+impl delegate::Kind for Explain<'_> {
     fn kind(&mut self, kind: spec::Kind) -> Option<()> {
         self.prefix()?;
         self.call = 0;
@@ -215,10 +215,10 @@ impl<'a> delegate::Kind for Explain<'a> {
     }
 }
 
-impl<'a> Delegate for Explain<'a> {
+impl Delegate for Explain<'_> {
     fn done(&mut self) {
         if !self.has_implicit_anchor && self.ref_name.is_none() && self.oid_prefix.is_none() {
-            self.err = Some("Incomplete specification lacks its anchor, like a reference or object name".into())
+            self.err = Some("Incomplete specification lacks its anchor, like a reference or object name".into());
         }
     }
 }

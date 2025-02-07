@@ -49,7 +49,7 @@ pub(crate) mod function {
         }: Options,
     ) -> anyhow::Result<()>
     where
-        P: gix::Progress,
+        P: gix::NestedProgress,
         P::SubProgress: 'static,
     {
         if format != OutputFormat::Human {
@@ -70,7 +70,7 @@ pub(crate) mod function {
 
         if handshake_info {
             writeln!(out, "Handshake Information")?;
-            writeln!(out, "\t{:?}", res.ref_map.handshake)?;
+            writeln!(out, "\t{:?}", res.handshake)?;
         }
 
         let ref_specs = remote.refspecs(gix::remote::Direction::Fetch);
@@ -134,7 +134,7 @@ pub(crate) mod function {
         mut progress: impl gix::Progress,
     ) -> anyhow::Result<()> {
         progress.init(Some(graph.len()), gix::progress::count("commits"));
-        progress.set_name("building graph");
+        progress.set_name("building graph".into());
 
         let mut map = gix::hashtable::HashMap::default();
         let mut vg = layout::topo::layout::VisualGraph::new(Orientation::TopToBottom);
@@ -168,7 +168,7 @@ pub(crate) mod function {
         }
 
         let start = std::time::Instant::now();
-        progress.set_name("layout graph");
+        progress.set_name("layout graph".into());
         progress.info(format!("writing {path:?}…"));
         let mut svg = SVGWriter::new();
         vg.do_it(false, false, false, &mut svg);
@@ -210,7 +210,7 @@ pub(crate) mod function {
         mut out: impl std::io::Write,
         mut err: impl std::io::Write,
     ) -> anyhow::Result<()> {
-        let mut last_spec_index = gix::remote::fetch::SpecIndex::ExplicitInRemote(usize::MAX);
+        let mut last_spec_index = gix::remote::fetch::refmap::SpecIndex::ExplicitInRemote(usize::MAX);
         let mut updates = update_refs
             .iter_mapping_updates(&map.mappings, refspecs, &map.extra_refspecs)
             .filter_map(|(update, mapping, spec, edit)| spec.map(|spec| (update, mapping, spec, edit)))
@@ -258,10 +258,10 @@ pub(crate) mod function {
 
             write!(out, "\t")?;
             match &mapping.remote {
-                gix::remote::fetch::Source::ObjectId(id) => {
+                gix::remote::fetch::refmap::Source::ObjectId(id) => {
                     write!(out, "{}", id.attach(repo).shorten_or_id())?;
                 }
-                gix::remote::fetch::Source::Ref(r) => {
+                gix::remote::fetch::refmap::Source::Ref(r) => {
                     crate::repository::remote::refs::print_ref(&mut out, r)?;
                 }
             };
@@ -305,7 +305,7 @@ pub(crate) mod function {
             for fix in &map.fixes {
                 match fix {
                     Fix::MappingWithPartialDestinationRemoved { name, spec } => {
-                        if prev_spec.map_or(true, |prev_spec| prev_spec != spec) {
+                        if prev_spec.is_some_and(|prev_spec| prev_spec != spec) {
                             prev_spec = spec.into();
                             spec.to_ref().write_to(&mut err)?;
                             writeln!(err)?;

@@ -1,5 +1,3 @@
-use std::convert::TryInto;
-
 ///
 pub mod decode {
     /// The error returned by [`decode()`][super::decode()].
@@ -34,7 +32,7 @@ pub fn decode(data: &[u8]) -> Result<(Vec, &[u8]), decode::Error> {
     for _ in 0..len {
         let (bit_num, rest) = bits.split_at(std::mem::size_of::<u64>());
         bits = rest;
-        buf.push(u64::from_be_bytes(bit_num.try_into().unwrap()))
+        buf.push(u64::from_be_bytes(bit_num.try_into().unwrap()));
     }
 
     let (rlw, data) = decode::u32(data).ok_or(Error::Corrupt {
@@ -52,8 +50,6 @@ pub fn decode(data: &[u8]) -> Result<(Vec, &[u8]), decode::Error> {
 }
 
 mod access {
-    use std::convert::{TryFrom, TryInto};
-
     use super::Vec;
 
     impl Vec {

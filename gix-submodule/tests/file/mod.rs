@@ -5,17 +5,21 @@ fn submodule(bytes: &str) -> gix_submodule::File {
 mod is_active_platform {
     use std::str::FromStr;
 
-    use bstr::{BStr, ByteSlice};
-
-    fn multi_modules() -> crate::Result<gix_submodule::File> {
+    fn module_file(name: &str) -> crate::Result<gix_submodule::File> {
         let modules = gix_testtools::scripted_fixture_read_only("basic.sh")?
-            .join("multiple")
+            .join(name)
             .join(".gitmodules");
         Ok(gix_submodule::File::from_bytes(
             std::fs::read(&modules)?.as_slice(),
             modules,
             &Default::default(),
         )?)
+    }
+
+    use bstr::{BStr, ByteSlice};
+
+    fn multi_modules() -> crate::Result<gix_submodule::File> {
+        module_file("multiple")
     }
 
     fn assume_valid_active_state<'a>(
@@ -46,25 +50,34 @@ mod is_active_platform {
             .map(|name| {
                 (
                     name.to_str().expect("valid"),
-                    platform
-                        .is_active(module, config, name, &mut attributes)
-                        .expect("valid"),
+                    platform.is_active(config, name, &mut attributes).expect("valid"),
                 )
             })
             .collect())
     }
 
     #[test]
-    fn without_any_additional_settings_all_are_active_if_they_have_a_url() -> crate::Result {
+    fn without_submodule_in_index() -> crate::Result {
+        let module = module_file("not-a-submodule")?;
+        assert_eq!(
+            module.names().map(ToOwned::to_owned).collect::<Vec<_>>(),
+            ["submodule"],
+            "entries can be read"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn without_any_additional_settings_all_are_inactive_if_they_have_a_url() -> crate::Result {
         let module = multi_modules()?;
         assert_eq!(
             assume_valid_active_state(&module, &Default::default(), Default::default())?,
             &[
-                ("submodule", true),
-                ("a/b", true),
-                (".a/..c", true),
-                ("a/d\\", true),
-                ("a\\e", true)
+                ("submodule", false),
+                ("a/b", false),
+                (".a/..c", false),
+                ("a/d\\", false),
+                ("a\\e", false)
             ]
         );
         Ok(())
@@ -77,7 +90,7 @@ mod is_active_platform {
             assume_valid_active_state(
                 &module,
                 &gix_config::File::from_str(
-                    "[submodule.submodule]\n active = 0\n[submodule \"a/b\"]\n active = false"
+                    "[submodule.submodule]\n active = 0\n url = set \n[submodule \"a/b\"]\n active = false \n url = set \n[submodule \".a/..c\"] active = 1"
                 )?,
                 Default::default()
             )?,
@@ -85,8 +98,8 @@ mod is_active_platform {
                 ("submodule", false),
                 ("a/b", false),
                 (".a/..c", true),
-                ("a/d\\", true),
-                ("a\\e", true)
+                ("a/d\\", false),
+                ("a\\e", false)
             ]
         );
         Ok(())

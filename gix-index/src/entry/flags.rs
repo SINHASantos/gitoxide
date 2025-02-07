@@ -60,8 +60,30 @@ bitflags! {
 }
 
 impl Flags {
+    /// Create a new instance whose stage is set to `stage`.
+    pub fn from_stage(stage: Stage) -> Self {
+        Flags::from_bits((stage as u32) << 12).expect("stage can only be valid flags")
+    }
+
     /// Return the stage as extracted from the bits of this instance.
     pub fn stage(&self) -> Stage {
+        match self.stage_raw() {
+            0 => Stage::Unconflicted,
+            1 => Stage::Base,
+            2 => Stage::Ours,
+            3 => Stage::Theirs,
+            _ => unreachable!("BUG: Flags::STAGE_MASK is two bits, whose 4 possible values we have covered"),
+        }
+    }
+
+    /// Return an entry's stage as raw number between 0 and 4.
+    /// Possible values are:
+    ///
+    /// * 0 = no conflict,
+    /// * 1 = base,
+    /// * 2 = ours,
+    /// * 3 = theirs
+    pub fn stage_raw(&self) -> u32 {
         (*self & Flags::STAGE_MASK).bits() >> 12
     }
 
@@ -76,6 +98,12 @@ impl Flags {
             }
             .bits() as u16,
         )
+    }
+}
+
+impl From<Stage> for Flags {
+    fn from(value: Stage) -> Self {
+        Flags::from_stage(value)
     }
 }
 
@@ -98,7 +126,7 @@ pub(crate) mod at_rest {
 
     impl Flags {
         pub fn to_memory(self) -> super::Flags {
-            super::Flags::from_bits_retain(self.bits() as u32)
+            super::Flags::from_bits_retain(u32::from(self.bits()))
         }
     }
 
@@ -118,7 +146,7 @@ pub(crate) mod at_rest {
             )
         }
         pub fn to_flags(self) -> Option<super::Flags> {
-            super::Flags::from_bits((self.bits() as u32) << 16)
+            super::Flags::from_bits(u32::from(self.bits()) << 16)
         }
     }
 

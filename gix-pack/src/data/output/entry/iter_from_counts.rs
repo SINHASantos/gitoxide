@@ -1,7 +1,14 @@
 pub(crate) mod function {
     use std::{cmp::Ordering, sync::Arc};
 
-    use gix_features::{parallel, parallel::SequenceId, progress::Progress};
+    use gix_features::{
+        parallel,
+        parallel::SequenceId,
+        progress::{
+            prodash::{Count, DynNestedProgress},
+            Progress,
+        },
+    };
 
     use super::{reduce, util, Error, Mode, Options, Outcome, ProgressId};
     use crate::data::output;
@@ -33,12 +40,12 @@ pub(crate) mod function {
     ///
     /// * ~~currently there is no way to easily write the pack index, even though the state here is uniquely positioned to do
     ///   so with minimal overhead (especially compared to `gix index-from-pack`)~~ Probably works now by chaining Iterators
-    ///  or keeping enough state to write a pack and then generate an index with recorded data.
+    ///   or keeping enough state to write a pack and then generate an index with recorded data.
     ///
     pub fn iter_from_counts<Find>(
         mut counts: Vec<output::Count>,
         db: Find,
-        mut progress: impl Progress + 'static,
+        mut progress: Box<dyn DynNestedProgress + 'static>,
         Options {
             version,
             mode,
@@ -46,11 +53,10 @@ pub(crate) mod function {
             thread_limit,
             chunk_size,
         }: Options,
-    ) -> impl Iterator<Item = Result<(SequenceId, Vec<output::Entry>), Error<Find::Error>>>
-           + parallel::reduce::Finalize<Reduce = reduce::Statistics<Error<Find::Error>>>
+    ) -> impl Iterator<Item = Result<(SequenceId, Vec<output::Entry>), Error>>
+           + parallel::reduce::Finalize<Reduce = reduce::Statistics<Error>>
     where
         Find: crate::Find + Send + Clone + 'static,
-        <Find as crate::Find>::Error: Send,
     {
         assert!(
             matches!(version, crate::data::Version::V2),
@@ -60,7 +66,7 @@ pub(crate) mod function {
             parallel::optimize_chunk_size_and_thread_limit(chunk_size, Some(counts.len()), thread_limit, None);
         {
             let progress = Arc::new(parking_lot::Mutex::new(
-                progress.add_child_with_id("resolving", ProgressId::ResolveCounts.into()),
+                progress.add_child_with_id("resolving".into(), ProgressId::ResolveCounts.into()),
             ));
             progress.lock().init(None, gix_features::progress::count("counts"));
             let enough_counts_present = counts.len() > 4_000;
@@ -79,7 +85,7 @@ pub(crate) mod function {
                             use crate::data::output::count::PackLocation::*;
                             match count.entry_pack_location {
                                 LookedUp(_) => continue,
-                                NotLookedUp => count.entry_pack_location = LookedUp(db.location_by_oid(count.id, buf)),
+                                NotLookedUp => count.entry_pack_location = LookedUp(db.location_by_oid(&count.id, buf)),
                             }
                         }
                         progress.lock().inc_by(chunk_size);
@@ -93,7 +99,7 @@ pub(crate) mod function {
         }
         let counts_range_by_pack_id = match mode {
             Mode::PackCopyAndBaseObjects => {
-                let mut progress = progress.add_child_with_id("sorting", ProgressId::SortEntries.into());
+                let mut progress = progress.add_child_with_id("sorting".into(), ProgressId::SortEntries.into());
                 progress.init(Some(counts.len()), gix_features::progress::count("counts"));
                 let start = std::time::Instant::now();
 
@@ -175,7 +181,7 @@ pub(crate) mod function {
                                 .clone();
                                 let base_index_offset = pack_range.start;
                                 let counts_in_pack = &counts[pack_range];
-                                match output::Entry::from_pack_entry(
+                                let entry = output::Entry::from_pack_entry(
                                     pack_entry,
                                     count,
                                     counts_in_pack,
@@ -199,12 +205,13 @@ pub(crate) mod function {
                                         }
                                     }),
                                     version,
-                                ) {
+                                );
+                                match entry {
                                     Some(entry) => {
                                         stats.objects_copied_from_pack += 1;
                                         entry
                                     }
-                                    None => match db.try_find(count.id, buf).map_err(Error::FindExisting)? {
+                                    None => match db.try_find(&count.id, buf).map_err(Error::Find)? {
                                         Some((obj, _location)) => {
                                             stats.decoded_and_recompressed_objects += 1;
                                             output::Entry::from_data(count, &obj)
@@ -216,7 +223,7 @@ pub(crate) mod function {
                                     },
                                 }
                             }
-                            None => match db.try_find(count.id, buf).map_err(Error::FindExisting)? {
+                            None => match db.try_find(&count.id, buf).map_err(Error::Find)? {
                                 Some((obj, _location)) => {
                                     stats.decoded_and_recompressed_objects += 1;
                                     output::Entry::from_data(count, &obj)
@@ -395,12 +402,9 @@ mod types {
     /// The error returned by the pack generation function [`iter_from_counts()`][crate::data::output::entry::iter_from_counts()].
     #[derive(Debug, thiserror::Error)]
     #[allow(missing_docs)]
-    pub enum Error<FindErr>
-    where
-        FindErr: std::error::Error + 'static,
-    {
+    pub enum Error {
         #[error(transparent)]
-        FindExisting(FindErr),
+        Find(gix_object::find::Error),
         #[error(transparent)]
         NewEntry(#[from] entry::Error),
     }

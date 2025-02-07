@@ -1,5 +1,4 @@
 # Must be sourced into the main journey test
-set -eu
 
 title plumbing "${kind}"
 snapshot="$snapshot/plumbing"
@@ -38,7 +37,7 @@ title '`gix` crate'
 
   (when "running the example program to check order of signal handlers"
     it "fails as the process aborts" && {
-      expect_run $ABORTED cargo run --no-default-features --example interrupt-handler-allows-graceful-shutdown
+      expect_run $ABORTED cargo run --no-default-features --features interrupt --example interrupt-handler-allows-graceful-shutdown
     }
     it "cleans up the tempfile it created" && {
       expect_run $WITH_FAILURE test -e "example-file.tmp"
@@ -46,7 +45,7 @@ title '`gix` crate'
   )
   (when "running the example program to check reversibility of signal handlers"
     it "fails as the process aborts" && {
-      expect_run $ABORTED cargo run --no-default-features --example reversible-interrupt-handlers
+      expect_run $ABORTED cargo run --no-default-features --features interrupt --example reversible-interrupt-handlers
     }
   )
 )
@@ -108,6 +107,8 @@ title "gix (with repository)"
         )
         fi
 
+        # for some reason, on CI the daemon always shuts down before we can connect,
+        # or isn't actually ready despite having accepted the first connection already.
         (with "git:// protocol"
           launch-git-daemon
           (with "version 1"
@@ -250,14 +251,14 @@ title "gix commit-graph"
           (with "version 2"
             (with "NO output directory"
               it "generates the correct output" && {
-                WITH_SNAPSHOT="$snapshot/file-v-any-no-output" \
+                WITH_SNAPSHOT="$snapshot/file-v-any-no-output-p2" \
                 expect_run $SUCCESSFULLY "$exe_plumbing" --no-verbose free pack receive -p 2 .git
               }
             )
             (with "output directory"
               mkdir out/
               it "generates the correct output" && {
-                WITH_SNAPSHOT="$snapshot/file-v-any-with-output" \
+                WITH_SNAPSHOT="$snapshot/file-v-any-with-output-p2" \
                 expect_run $SUCCESSFULLY "$exe_plumbing" --no-verbose free pack receive .git out/
               }
               it "creates an index and a pack in the output directory" && {
@@ -269,7 +270,7 @@ title "gix commit-graph"
             if test "$kind" = "max" || test "$kind" = "max-pure"; then
             (with "--format json"
               it "generates the correct output in JSON format" && {
-                WITH_SNAPSHOT="$snapshot/file-v-any-no-output-json" \
+                WITH_SNAPSHOT="$snapshot/file-v-any-no-output-json-p2" \
                 expect_run $SUCCESSFULLY "$exe_plumbing" --no-verbose --format json free pack receive --protocol 2 .git
               }
             )
@@ -306,7 +307,7 @@ title "gix commit-graph"
             (with "NO output directory"
               (with "NO wanted refs"
                 it "generates the correct output" && {
-                  WITH_SNAPSHOT="$snapshot/file-v-any-no-output" \
+                  WITH_SNAPSHOT="$snapshot/file-v-any-no-output-p2" \
                   expect_run $SUCCESSFULLY "$exe_plumbing" --no-verbose free pack receive -p 2 git://localhost/
                 }
               )
@@ -325,7 +326,7 @@ title "gix commit-graph"
             )
             (with "output directory"
               it "generates the correct output" && {
-                WITH_SNAPSHOT="$snapshot/file-v-any-with-output" \
+                WITH_SNAPSHOT="$snapshot/file-v-any-with-output-p2" \
                 expect_run $SUCCESSFULLY "$exe_plumbing" --no-verbose free pack receive git://localhost/ out/
               }
             )
@@ -345,6 +346,33 @@ title "gix commit-graph"
               }
             )
           )
+          (with "an ambiguous ssh username which could be mistaken for an argument"
+            snapshot="$snapshot/fail-ambiguous-username"
+            (with "explicit ssh (true url with scheme)"
+              it "fails without trying to pass it to command-line programs" && {
+                WITH_SNAPSHOT="$snapshot/explicit-ssh" \
+                expect_run $WITH_FAILURE "$exe_plumbing" free pack receive 'ssh://-Fconfigfile@foo/bar'
+              }
+            )
+            (with "implicit ssh (special syntax with no scheme)"
+              it "fails without trying to pass it to command-line programs" && {
+                WITH_SNAPSHOT="$snapshot/implicit-ssh" \
+                expect_run $WITH_FAILURE "$exe_plumbing" free pack receive -- '-Fconfigfile@foo:bar/baz'
+              }
+            )
+          )
+          (with "an ambiguous ssh host which could be mistaken for an argument"
+              it "fails without trying to pass it to command-line programs" && {
+                WITH_SNAPSHOT="$snapshot/fail-ambiguous-host" \
+                expect_run $WITH_FAILURE "$exe_plumbing" free pack receive 'ssh://-oProxyCommand=open$IFS-aCalculator/foo'
+              }
+          )
+          (with "an ambiguous ssh path which could be mistaken for an argument"
+              it "fails without trying to pass it to command-line programs" && {
+                WITH_SNAPSHOT="$snapshot/fail-ambiguous-path" \
+                expect_run $WITH_FAILURE "$exe_plumbing" free pack receive 'git@foo:-oProxyCommand=open$IFS-aCalculator/bar'
+              }
+          )
           fi
         )
         elif [[ "$kind" = "small" ]]; then
@@ -355,6 +383,38 @@ title "gix commit-graph"
         fi
       )
     )
+    if test "$kind" = "max" || test "$kind" = "max-pure"; then
+    (with "the 'clone' sub-command"
+        snapshot="$snapshot/clone"
+        (with "an ambiguous ssh username which could be mistaken for an argument"
+          snapshot="$snapshot/fail-ambiguous-username"
+          (with "explicit ssh (true url with scheme)"
+            it "fails without trying to pass it to command-line programs" && {
+              WITH_SNAPSHOT="$snapshot/explicit-ssh" \
+              expect_run $WITH_FAILURE "$exe_plumbing" clone 'ssh://-Fconfigfile@foo/bar'
+            }
+          )
+          (with "implicit ssh (special syntax with no scheme)"
+            it "fails without trying to pass it to command-line programs" && {
+              WITH_SNAPSHOT="$snapshot/implicit-ssh" \
+              expect_run $WITH_FAILURE "$exe_plumbing" clone -- '-Fconfigfile@foo:bar/baz'
+            }
+          )
+        )
+        (with "an ambiguous ssh host which could be mistaken for an argument"
+            it "fails without trying to pass it to command-line programs" && {
+              WITH_SNAPSHOT="$snapshot/fail-ambiguous-host" \
+              expect_run $WITH_FAILURE "$exe_plumbing" clone 'ssh://-oProxyCommand=open$IFS-aCalculator/foo'
+            }
+        )
+        (with "an ambiguous ssh path which could be mistaken for an argument"
+            it "fails without trying to pass it to command-line programs" && {
+              WITH_SNAPSHOT="$snapshot/fail-ambiguous-path" \
+              expect_run $WITH_FAILURE "$exe_plumbing" clone 'git@foo:-oProxyCommand=open$IFS-aCalculator/bar'
+            }
+        )
+    )
+    fi
     (with "the 'index' sub-command"
       snapshot="$snapshot/index"
       title "gix free pack index create"
@@ -491,20 +551,17 @@ title "gix commit-graph"
                   expect_run $WITH_FAILURE test -e "${PACK_FILE}".idx
                 }
 
-                (with_program find
-
-                  if test "$kind" = "small" ; then
-                    suffix=miniz-oxide
-                  elif test "$kind" = "max-pure"; then
-                    suffix=miniz-oxide-max
-                  else
-                    suffix=zlib-ng
-                  fi
-                  it "creates all pack objects, but the broken ones" && {
-                    WITH_SNAPSHOT="$snapshot/broken-with-objects-dir-skip-checks-success-tree-$suffix" \
-                    expect_run_sh $SUCCESSFULLY 'find . -type f | sort'
-                  }
-                )
+                if test "$kind" = "small" ; then
+                  suffix=miniz-oxide
+                elif test "$kind" = "max-pure"; then
+                  suffix=miniz-oxide-max
+                else
+                  suffix=zlib-ng
+                fi
+                it "creates all pack objects, but the broken ones" && {
+                  WITH_SNAPSHOT="$snapshot/broken-with-objects-dir-skip-checks-success-tree-$suffix" \
+                  expect_run_sh $SUCCESSFULLY 'find . -type f | sort'
+                }
               )
             )
           )
@@ -524,12 +581,10 @@ title "gix commit-graph"
                                                      "${PACK_FILE}.pack" .
           }
 
-          (with_program find
-            it "creates all pack objects" && {
-              WITH_SNAPSHOT="$snapshot/with-objects-dir-success-tree" \
-              expect_run_sh $SUCCESSFULLY 'find . -type f | sort'
-            }
-          )
+          it "creates all pack objects" && {
+            WITH_SNAPSHOT="$snapshot/with-objects-dir-success-tree" \
+            expect_run_sh $SUCCESSFULLY 'find . -type f | sort'
+          }
         )
       )
     )

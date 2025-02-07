@@ -12,19 +12,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args();
     let sub_command = args.nth(1).ok_or("Need sub-command")?;
     let next_arg = args.next(); // possibly %f
-    let needs_failure = next_arg.as_deref().map_or(false, |file| file.ends_with("fail"));
+    let needs_failure = next_arg.as_deref().is_some_and(|file| file.ends_with("fail"));
     if needs_failure {
         panic!("failure requested for {sub_command}");
     }
 
     match sub_command.as_str() {
         "process" => {
-            let disallow_delay = next_arg.as_deref().map_or(false, |arg| arg == "disallow-delay");
+            let disallow_delay = next_arg.as_deref() == Some("disallow-delay");
             let mut srv = gix_filter::driver::process::Server::handshake(
                 stdin(),
                 stdout(),
                 "git-filter",
-                |versions| versions.contains(&2).then_some(2),
+                &mut |versions| versions.contains(&2).then_some(2),
                 if disallow_delay {
                     &["clean", "smudge"]
                 } else {
@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .meta
                     .iter()
                     .find_map(|(key, value)| (key == "pathname").then_some(value))
-                    .map_or(false, |path| path.ends_with(b"fail"));
+                    .is_some_and(|path| path.ends_with(b"fail"));
                 let pathname = request
                     .meta
                     .iter()
@@ -150,7 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 buf.clear();
                                 buf.push_str("pathname=");
                                 buf.extend_from_slice(path);
-                                out.write_all(&buf)?
+                                out.write_all(&buf)?;
                             }
                         }
                         request.write_status(process::Status::success())?;

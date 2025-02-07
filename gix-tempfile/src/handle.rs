@@ -1,4 +1,5 @@
 //!
+#![allow(clippy::empty_docs)]
 use std::{io, path::Path};
 
 use tempfile::{NamedTempFile, TempPath};
@@ -23,12 +24,12 @@ pub(crate) enum Mode {
 /// Utilities
 impl Handle<()> {
     fn at_path(
-        path: impl AsRef<Path>,
+        path: &Path,
         directory: ContainingDirectory,
         cleanup: AutoRemove,
         mode: Mode,
+        permissions: Option<std::fs::Permissions>,
     ) -> io::Result<usize> {
-        let path = path.as_ref();
         let tempfile = {
             let mut builder = tempfile::Builder::new();
             let dot_ext_storage;
@@ -40,6 +41,9 @@ impl Handle<()> {
                 dot_ext_storage = format!(".{}", ext.to_string_lossy());
                 builder.suffix(&dot_ext_storage);
             }
+            if let Some(permissions) = permissions {
+                builder.permissions(permissions);
+            }
             let parent_dir = path.parent().expect("parent directory is present");
             let parent_dir = directory.resolve(parent_dir)?;
             ForksafeTempfile::new(builder.rand_bytes(0).tempfile_in(parent_dir)?, cleanup, mode)
@@ -50,12 +54,12 @@ impl Handle<()> {
     }
 
     fn new_writable_inner(
-        containing_directory: impl AsRef<Path>,
+        containing_directory: &Path,
         directory: ContainingDirectory,
         cleanup: AutoRemove,
         mode: Mode,
     ) -> io::Result<usize> {
-        let containing_directory = directory.resolve(containing_directory.as_ref())?;
+        let containing_directory = directory.resolve(containing_directory)?;
         let id = NEXT_MAP_INDEX.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         expect_none(REGISTRY.insert(
             id,
@@ -75,9 +79,27 @@ impl Handle<Closed> {
     ///
     /// Depending on the `directory` configuration, intermediate directories will be created, and depending on `cleanup` empty
     /// intermediate directories will be removed.
+    ///
+    /// ### Warning of potential leaks
+    ///
+    /// Without [signal handlers](crate::signal) installed, tempfiles will remain once a termination
+    /// signal is encountered as destructors won't run. See [the top-level documentation](crate) for more.
     pub fn at(path: impl AsRef<Path>, directory: ContainingDirectory, cleanup: AutoRemove) -> io::Result<Self> {
         Ok(Handle {
-            id: Handle::<()>::at_path(path, directory, cleanup, Mode::Closed)?,
+            id: Handle::<()>::at_path(path.as_ref(), directory, cleanup, Mode::Closed, None)?,
+            _marker: Default::default(),
+        })
+    }
+
+    /// Like [`at`](Self::at()), but with support for filesystem `permissions`.
+    pub fn at_with_permissions(
+        path: impl AsRef<Path>,
+        directory: ContainingDirectory,
+        cleanup: AutoRemove,
+        permissions: std::fs::Permissions,
+    ) -> io::Result<Self> {
+        Ok(Handle {
+            id: Handle::<()>::at_path(path.as_ref(), directory, cleanup, Mode::Closed, Some(permissions))?,
             _marker: Default::default(),
         })
     }
@@ -98,9 +120,27 @@ impl Handle<Writable> {
     ///
     /// Depending on the `directory` configuration, intermediate directories will be created, and depending on `cleanup` empty
     /// intermediate directories will be removed.
+    ///
+    /// ### Warning of potential leaks
+    ///
+    /// Without [signal handlers](crate::signal) installed, tempfiles will remain once a termination
+    /// signal is encountered as destructors won't run. See [the top-level documentation](crate) for more.
     pub fn at(path: impl AsRef<Path>, directory: ContainingDirectory, cleanup: AutoRemove) -> io::Result<Self> {
         Ok(Handle {
-            id: Handle::<()>::at_path(path, directory, cleanup, Mode::Writable)?,
+            id: Handle::<()>::at_path(path.as_ref(), directory, cleanup, Mode::Writable, None)?,
+            _marker: Default::default(),
+        })
+    }
+
+    /// Like [`at`](Self::at()), but with support for filesystem `permissions`.
+    pub fn at_with_permissions(
+        path: impl AsRef<Path>,
+        directory: ContainingDirectory,
+        cleanup: AutoRemove,
+        permissions: std::fs::Permissions,
+    ) -> io::Result<Self> {
+        Ok(Handle {
+            id: Handle::<()>::at_path(path.as_ref(), directory, cleanup, Mode::Writable, Some(permissions))?,
             _marker: Default::default(),
         })
     }
@@ -108,13 +148,18 @@ impl Handle<Writable> {
     /// Create a registered tempfile within `containing_directory` with a name that won't clash, and clean it up as specified with `cleanup`.
     /// Control how to deal with intermediate directories with `directory`.
     /// The temporary file is opened and can be written to using the [`with_mut()`][Handle::with_mut()] method.
+    ///
+    /// ### Warning of potential leaks
+    ///
+    /// Without [signal handlers](crate::signal) installed, tempfiles will remain once a termination
+    /// signal is encountered as destructors won't run. See [the top-level documentation](crate) for more.
     pub fn new(
         containing_directory: impl AsRef<Path>,
         directory: ContainingDirectory,
         cleanup: AutoRemove,
     ) -> io::Result<Self> {
         Ok(Handle {
-            id: Handle::<()>::new_writable_inner(containing_directory, directory, cleanup, Mode::Writable)?,
+            id: Handle::<()>::new_writable_inner(containing_directory.as_ref(), directory, cleanup, Mode::Writable)?,
             _marker: Default::default(),
         })
     }

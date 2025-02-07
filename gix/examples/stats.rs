@@ -11,8 +11,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut most_recent_commit_id = None;
     let num_commits = repo
         .head()?
-        .into_fully_peeled_id()
-        .ok_or("Cannot provide meaningful stats on empty repos")??
+        .try_into_peeled_id()?
+        .ok_or("Cannot provide meaningful stats on empty repos")?
         .ancestors()
         .all()?
         .map_while(Result::ok)
@@ -39,7 +39,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut delegate = visit::Tree::new(repo.clone());
     tree.traverse().breadthfirst(&mut delegate)?;
-    let _files = tree.traverse().breadthfirst.files()?;
 
     println!("num trees: {}", delegate.num_trees);
     println!("num blobs: {}", delegate.num_blobs);
@@ -105,6 +104,8 @@ mod visit {
         }
     }
     impl gix_traverse::tree::Visit for Tree {
+        fn pop_back_tracked_path_and_set_current(&mut self) {}
+
         fn pop_front_tracked_path_and_set_current(&mut self) {}
 
         fn push_back_tracked_path_component(&mut self, _component: &BStr) {}
@@ -119,16 +120,16 @@ mod visit {
         }
 
         fn visit_nontree(&mut self, entry: &EntryRef<'_>) -> Action {
-            use gix::objs::tree::EntryMode::*;
-            match entry.mode {
+            use gix::objs::tree::EntryKind::*;
+            match entry.mode.kind() {
                 Commit => self.num_submodules += 1,
                 Blob => {
                     self.count_bytes(entry.oid);
-                    self.num_blobs += 1
+                    self.num_blobs += 1;
                 }
                 BlobExecutable => {
                     self.count_bytes(entry.oid);
-                    self.num_blobs_exec += 1
+                    self.num_blobs_exec += 1;
                 }
                 Link => self.num_links += 1,
                 Tree => unreachable!("BUG"),

@@ -45,7 +45,8 @@ impl Entry {
     }
 }
 
-mod decode;
+///
+pub mod decode;
 
 mod header;
 pub use header::Header;

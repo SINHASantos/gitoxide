@@ -1,4 +1,4 @@
-//! This is the documentation of the binaries that come with `gitoxide`. These are called…
+//! This is the documentation of the binaries that come with `gitoxide`. These are called `gix` and `ein`.
 //!
 //! #### `gix`
 //!
@@ -16,9 +16,15 @@
 //! Feature configuration can be complex and this document seeks to provide an overview.
 //!
 #![cfg_attr(
-    feature = "document-features",
-    cfg_attr(doc, doc = ::document_features::document_features!())
+    all(doc, feature = "document-features"),
+    doc = ::document_features::document_features!()
 )]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
-#![deny(rust_2018_idioms, missing_docs)]
-#![forbid(unsafe_code)]
+#![cfg_attr(all(doc, feature = "document-features"), feature(doc_cfg, doc_auto_cfg))]
+#![deny(rust_2018_idioms)]
+#![allow(missing_docs)]
+#![deny(unsafe_code)]
+
+pub mod plumbing;
+pub mod porcelain;
+/// everything in common between the `gix` and `ein` binaries.
+pub mod shared;

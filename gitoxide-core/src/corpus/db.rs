@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context};
 use bytesize::ByteSize;
 use rusqlite::{params, OptionalExtension};
-use sysinfo::{CpuExt, CpuRefreshKind, RefreshKind, SystemExt};
+use sysinfo::{CpuRefreshKind, RefreshKind};
 
 use crate::corpus::{Engine, Run};
 
@@ -92,7 +92,7 @@ pub fn create(path: impl AsRef<std::path::Path>) -> anyhow::Result<rusqlite::Con
     "#,
     )?;
     con.execute_batch(
-        r#"
+        r"
     CREATE TABLE if not exists repository(
         id integer PRIMARY KEY,
         rela_path text, -- the path to the repository on disk, relative to the corpus root path, without leading `./` or `.\`
@@ -103,7 +103,7 @@ pub fn create(path: impl AsRef<std::path::Path>) -> anyhow::Result<rusqlite::Con
         FOREIGN KEY (corpus) REFERENCES corpus (id)
         UNIQUE (rela_path, corpus)
     )
-    "#,
+    ",
     )?;
     con.execute_batch(
         r#"
@@ -131,7 +131,7 @@ pub fn create(path: impl AsRef<std::path::Path>) -> anyhow::Result<rusqlite::Con
         task integer,
         gitoxide_version integer,
         insertion_time integer NOT NULL, -- in seconds since UNIX epoch
-        duration real, -- in seconds or NULL if not yet finished (either successfull or with failure)
+        duration real, -- in seconds or NULL if not yet finished (either successful or with failure)
         error text, -- or NULL if there was no error
         spans_json text, -- all spans collecteted while performing the run
         FOREIGN KEY (repository) REFERENCES repository (id),
@@ -152,7 +152,7 @@ impl Engine {
             sysinfo::System::new_with_specifics(RefreshKind::new().with_cpu(CpuRefreshKind::new().with_frequency()));
         let cpu = &sys.cpus()[0];
         let vendor = Some(cpu.vendor_id().to_owned());
-        let host = sys.host_name();
+        let host = sysinfo::System::host_name();
         let brand = Some(cpu.brand().to_owned());
         Ok(self.con.query_row(
             "INSERT INTO runner (vendor, brand, host_name) VALUES (?1, ?2, ?3) \

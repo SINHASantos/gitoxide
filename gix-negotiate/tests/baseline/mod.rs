@@ -1,8 +1,7 @@
 use std::cell::RefCell;
 
 use gix_negotiate::Algorithm;
-use gix_object::{bstr, bstr::ByteSlice};
-use gix_odb::{Find, FindExt};
+use gix_object::{bstr, bstr::ByteSlice, FindExt};
 use gix_ref::{file::ReferenceExt, store::WriteReflog};
 
 #[test]
@@ -27,26 +26,25 @@ fn run() -> crate::Result {
             let store = gix_odb::at(base.join("client").join(".git/objects"))?;
             let refs = gix_ref::file::Store::at(
                 base.join("client").join(".git"),
-                WriteReflog::Disable,
-                gix_hash::Kind::Sha1,
+                gix_ref::store::init::Options {
+                    write_reflog: WriteReflog::Disable,
+                    ..Default::default()
+                },
             );
             let lookup_names = |names: &[&str]| -> Vec<gix_hash::ObjectId> {
                 names
                     .iter()
                     .filter_map(|name| {
                         refs.try_find(*name).expect("one tag per commit").map(|mut r| {
-                            r.peel_to_id_in_place(&refs, |id, buf| {
-                                store.try_find(id, buf).map(|d| d.map(|d| (d.kind, d.data)))
-                            })
-                            .expect("works");
+                            r.peel_to_id_in_place(&refs, &store).expect("works");
                             r.target.into_id()
                         })
                     })
                     .collect()
             };
-            let message = |id| {
+            let message = |id: gix_hash::ObjectId| {
                 store
-                    .find_commit(id, obj_buf.borrow_mut().as_mut())
+                    .find_commit(&id, obj_buf.borrow_mut().as_mut())
                     .expect("present")
                     .message
                     .trim()
@@ -59,14 +57,7 @@ fn run() -> crate::Result {
                 let cache = use_cache
                     .then(|| gix_commitgraph::at(store.store_ref().path().join("info")).ok())
                     .flatten();
-                let mut graph = gix_revwalk::Graph::new(
-                    |id, buf| {
-                        store
-                            .try_find(id, buf)
-                            .map(|r| r.and_then(gix_object::Data::try_into_commit_iter))
-                    },
-                    cache,
-                );
+                let mut graph = gix_revwalk::Graph::new(&store, cache.as_ref());
                 let mut negotiator = algo.into_negotiator();
                 if debug {
                     eprintln!("ALGO {algo_name} CASE {case}");
@@ -80,7 +71,7 @@ fn run() -> crate::Result {
                 // }
                 for tip in lookup_names(&["HEAD"]).into_iter().chain(
                     refs.iter()?
-                        .prefixed("refs/heads")?
+                        .prefixed("refs/heads".as_ref())?
                         .filter_map(Result::ok)
                         .map(|r| r.target.into_id()),
                 ) {
@@ -163,7 +154,7 @@ impl<'a> ParseRounds<'a> {
     }
 }
 
-impl<'a> Iterator for ParseRounds<'a> {
+impl Iterator for ParseRounds<'_> {
     type Item = Round;
 
     fn next(&mut self) -> Option<Self::Item> {

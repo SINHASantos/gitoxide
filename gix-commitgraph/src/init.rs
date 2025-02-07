@@ -1,5 +1,4 @@
 use std::{
-    convert::TryFrom,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
 };
@@ -31,23 +30,20 @@ pub enum Error {
         err: std::io::Error,
         path: PathBuf,
     },
-    #[error(
-        "Commit-graph files contain {0} commits altogether, but only {} commits are allowed",
-        MAX_COMMITS
-    )]
+    #[error("Commit-graph files contain {0} commits altogether, but only {MAX_COMMITS} commits are allowed")]
     TooManyCommits(u64),
 }
 
 /// Instantiate a `Graph` from various sources.
 impl Graph {
     /// Instantiate a commit graph from `path` which may be a directory containing graph files or the graph file itself.
-    pub fn at(path: impl AsRef<Path>) -> Result<Self, Error> {
-        Self::try_from(path.as_ref())
+    pub fn at(path: &Path) -> Result<Self, Error> {
+        Self::try_from(path)
     }
 
     /// Instantiate a commit graph from the directory containing all of its files.
-    pub fn from_commit_graphs_dir(path: impl AsRef<Path>) -> Result<Self, Error> {
-        let commit_graphs_dir = path.as_ref();
+    pub fn from_commit_graphs_dir(path: &Path) -> Result<Self, Error> {
+        let commit_graphs_dir = path;
         let chain_file_path = commit_graphs_dir.join("commit-graph-chain");
         let chain_file = std::fs::File::open(&chain_file_path).map_err(|e| Error::Io {
             err: e,
@@ -70,8 +66,7 @@ impl Graph {
 
     /// Instantiate a commit graph from a `.git/objects/info/commit-graph` or
     /// `.git/objects/info/commit-graphs/graph-*.graph` file.
-    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, Error> {
-        let path = path.as_ref();
+    pub fn from_file(path: &Path) -> Result<Self, Error> {
         let file = File::at(path).map_err(|e| Error::File {
             err: e,
             path: path.to_owned(),
@@ -80,9 +75,9 @@ impl Graph {
     }
 
     /// Instantiate a commit graph from an `.git/objects/info` directory.
-    pub fn from_info_dir(info_dir: impl AsRef<Path>) -> Result<Self, Error> {
-        Self::from_file(info_dir.as_ref().join("commit-graph"))
-            .or_else(|_| Self::from_commit_graphs_dir(info_dir.as_ref().join("commit-graphs")))
+    pub fn from_info_dir(info_dir: &Path) -> Result<Self, Error> {
+        Self::from_file(&info_dir.join("commit-graph"))
+            .or_else(|_| Self::from_commit_graphs_dir(&info_dir.join("commit-graphs")))
     }
 
     /// Create a new commit graph from a list of `files`.

@@ -120,7 +120,7 @@ pub mod options {
 
 /// Options to configure http requests.
 // TODO: testing most of these fields requires a lot of effort, unless special flags to introspect ongoing requests are added.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct Options {
     /// Headers to be added to every request.
     /// They are applied unconditionally and are expected to be valid as they occur in an HTTP request, like `header: value`, without newlines.
@@ -179,10 +179,37 @@ pub struct Options {
     pub ssl_ca_info: Option<PathBuf>,
     /// The SSL version or version range to use, or `None` to let the TLS backend determine which versions are acceptable.
     pub ssl_version: Option<SslVersionRangeInclusive>,
+    /// Controls whether to perform SSL identity verification or not. Turning this off is not recommended and can lead to
+    /// various security risks. An example where this may be needed is when an internal git server uses a self-signed
+    /// certificate and the user accepts the associated security risks.
+    pub ssl_verify: bool,
     /// The HTTP version to enforce. If unset, it is implementation defined.
     pub http_version: Option<HttpVersion>,
     /// Backend specific options, if available.
     pub backend: Option<Arc<Mutex<dyn Any + Send + Sync + 'static>>>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            extra_headers: vec![],
+            follow_redirects: Default::default(),
+            low_speed_limit_bytes_per_second: 0,
+            low_speed_time_seconds: 0,
+            proxy: None,
+            no_proxy: None,
+            proxy_auth_method: Default::default(),
+            proxy_authenticate: None,
+            user_agent: None,
+            connect_timeout: None,
+            verbose: false,
+            ssl_ca_info: None,
+            ssl_version: None,
+            ssl_verify: true,
+            http_version: None,
+            backend: None,
+        }
+    }
 }
 
 /// The actual http client implementation, using curl
@@ -202,12 +229,14 @@ pub struct Transport<H: Http> {
     service: Option<Service>,
     line_provider: Option<gix_packetline::StreamingPeekableIter<H::ResponseBody>>,
     identity: Option<gix_sec::identity::Account>,
+    trace: bool,
 }
 
 impl<H: Http> Transport<H> {
     /// Create a new instance with `http` as implementation to communicate to `url` using the given `desired_version`.
     /// Note that we will always fallback to other versions as supported by the server.
-    pub fn new_http(http: H, url: gix_url::Url, desired_version: Protocol) -> Self {
+    /// If `trace` is `true`, all packetlines received or sent will be passed to the facilities of the `gix-trace` crate.
+    pub fn new_http(http: H, url: gix_url::Url, desired_version: Protocol, trace: bool) -> Self {
         let identity = url
             .user()
             .zip(url.password())
@@ -224,6 +253,7 @@ impl<H: Http> Transport<H> {
             http,
             line_provider: None,
             identity,
+            trace,
         }
     }
 }
@@ -238,10 +268,11 @@ impl<H: Http> Transport<H> {
 #[cfg(any(feature = "http-client-curl", feature = "http-client-reqwest"))]
 impl Transport<Impl> {
     /// Create a new instance to communicate to `url` using the given `desired_version` of the `git` protocol.
+    /// If `trace` is `true`, all packetlines received or sent will be passed to the facilities of the `gix-trace` crate.
     ///
     /// Note that the actual implementation depends on feature toggles.
-    pub fn new(url: gix_url::Url, desired_version: Protocol) -> Self {
-        Self::new_http(Impl::default(), url, desired_version)
+    pub fn new(url: gix_url::Url, desired_version: Protocol, trace: bool) -> Self {
+        Self::new_http(Impl::default(), url, desired_version, trace)
     }
 }
 
@@ -250,7 +281,7 @@ impl<H: Http> Transport<H> {
         let wanted_content_type = format!("application/x-{}-{}", service.as_str(), kind);
         if !headers.lines().collect::<Result<Vec<_>, _>>()?.iter().any(|l| {
             let mut tokens = l.split(':');
-            tokens.next().zip(tokens.next()).map_or(false, |(name, value)| {
+            tokens.next().zip(tokens.next()).is_some_and(|(name, value)| {
                 name.eq_ignore_ascii_case("content-type") && value.trim() == wanted_content_type
             })
         }) {
@@ -275,7 +306,7 @@ impl<H: Http> Transport<H> {
             headers.push(Cow::Owned(format!(
                 "Authorization: Basic {}",
                 base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"))
-            )))
+            )));
         }
         Ok(())
     }
@@ -300,8 +331,9 @@ impl<H: Http> client::TransportWithoutIO for Transport<H> {
         &mut self,
         write_mode: client::WriteMode,
         on_into_read: MessageKind,
+        trace: bool,
     ) -> Result<RequestWriter<'_>, client::Error> {
-        let service = self.service.expect("handshake() must have been called first");
+        let service = self.service.ok_or(client::Error::MissingHandshake)?;
         let url = append_url(&self.url, service.as_str());
         let static_headers = &[
             Cow::Borrowed(self.user_agent_header),
@@ -341,6 +373,7 @@ impl<H: Http> client::TransportWithoutIO for Transport<H> {
             }),
             write_mode,
             on_into_read,
+            trace,
         ))
     }
 
@@ -394,9 +427,9 @@ impl<H: Http> client::Transport for Transport<H> {
                 .get(url.as_ref(), &self.url, static_headers.iter().chain(&dynamic_headers))?;
         <Transport<H>>::check_content_type(service, "advertisement", headers)?;
 
-        let line_reader = self
-            .line_provider
-            .get_or_insert_with(|| gix_packetline::StreamingPeekableIter::new(body, &[PacketLineRef::Flush]));
+        let line_reader = self.line_provider.get_or_insert_with(|| {
+            gix_packetline::StreamingPeekableIter::new(body, &[PacketLineRef::Flush], self.trace)
+        });
 
         // the service announcement is only sent sometimes depending on the exact server/protocol version/used protocol (http?)
         // eat the announcement when its there to avoid errors later (and check that the correct service was announced).
@@ -445,7 +478,7 @@ impl<H: Http, B: Unpin> HeadersThenBody<H, B> {
     fn handle_headers(&mut self) -> std::io::Result<()> {
         if let Some(headers) = self.headers.take() {
             <Transport<H>>::check_content_type(self.service, "result", headers)
-                .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
         }
         Ok(())
     }
@@ -465,7 +498,7 @@ impl<H: Http, B: BufRead + Unpin> BufRead for HeadersThenBody<H, B> {
     }
 
     fn consume(&mut self, amt: usize) {
-        self.body.consume(amt)
+        self.body.consume(amt);
     }
 }
 
@@ -483,9 +516,9 @@ impl<H: Http, B: ReadlineBufRead + Unpin> ReadlineBufRead for HeadersThenBody<H,
     }
 }
 
-impl<H: Http, B: ExtendedBufRead + Unpin> ExtendedBufRead for HeadersThenBody<H, B> {
-    fn set_progress_handler(&mut self, handle_progress: Option<HandleProgress>) {
-        self.body.set_progress_handler(handle_progress)
+impl<'a, H: Http, B: ExtendedBufRead<'a> + Unpin> ExtendedBufRead<'a> for HeadersThenBody<H, B> {
+    fn set_progress_handler(&mut self, handle_progress: Option<HandleProgress<'a>>) {
+        self.body.set_progress_handler(handle_progress);
     }
 
     fn peek_data_line(&mut self) -> Option<std::io::Result<Result<&[u8], client::Error>>> {
@@ -496,7 +529,7 @@ impl<H: Http, B: ExtendedBufRead + Unpin> ExtendedBufRead for HeadersThenBody<H,
     }
 
     fn reset(&mut self, version: Protocol) {
-        self.body.reset(version)
+        self.body.reset(version);
     }
 
     fn stopped_at(&self) -> Option<MessageKind> {
@@ -505,15 +538,17 @@ impl<H: Http, B: ExtendedBufRead + Unpin> ExtendedBufRead for HeadersThenBody<H,
 }
 
 /// Connect to the given `url` via HTTP/S using the `desired_version` of the `git` protocol, with `http` as implementation.
+/// If `trace` is `true`, all packetlines received or sent will be passed to the facilities of the `gix-trace` crate.
 #[cfg(all(feature = "http-client", not(feature = "http-client-curl")))]
-pub fn connect_http<H: Http>(http: H, url: gix_url::Url, desired_version: Protocol) -> Transport<H> {
-    Transport::new_http(http, url, desired_version)
+pub fn connect_http<H: Http>(http: H, url: gix_url::Url, desired_version: Protocol, trace: bool) -> Transport<H> {
+    Transport::new_http(http, url, desired_version, trace)
 }
 
 /// Connect to the given `url` via HTTP/S using the `desired_version` of the `git` protocol.
+/// If `trace` is `true`, all packetlines received or sent will be passed to the facilities of the `gix-trace` crate.
 #[cfg(any(feature = "http-client-curl", feature = "http-client-reqwest"))]
-pub fn connect(url: gix_url::Url, desired_version: Protocol) -> Transport<Impl> {
-    Transport::new(url, desired_version)
+pub fn connect(url: gix_url::Url, desired_version: Protocol, trace: bool) -> Transport<Impl> {
+    Transport::new(url, desired_version, trace)
 }
 
 ///

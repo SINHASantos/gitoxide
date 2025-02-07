@@ -1,4 +1,4 @@
-#!/bin/bash
+# Must be sourced into the main journey test
 
 WHITE="$(tput setaf 9 2>/dev/null || echo -n '')"
 YELLOW="$(tput setaf 3 2>/dev/null || echo -n '')"
@@ -6,21 +6,6 @@ GREEN="$(tput setaf 2 2>/dev/null || echo -n '')"
 RED="$(tput setaf 1 2>/dev/null || echo -n '')"
 OFFSET=( )
 STEP="  "
-
-function with_program () {
-  local program="${1:?}"
-  hash "$program" &>/dev/null || {
-    function expect_run () {
-      echo 1>&2 "${WHITE} - skipped (missing program)"
-    }
-    function expect_run_sh () {
-      echo 1>&2 "${WHITE} - skipped (missing program)"
-    }
-    function expect_run_sh_no_pipefail () {
-      echo 1>&2 "${WHITE} - skipped (missing program)"
-    }
-  }
-}
 
 function on_ci () {
   [ -n "${CI-}" ] || {

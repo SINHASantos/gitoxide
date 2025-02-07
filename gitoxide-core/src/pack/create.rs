@@ -2,14 +2,8 @@ use std::{ffi::OsStr, io, path::Path, str::FromStr, time::Instant};
 
 use anyhow::anyhow;
 use gix::{
-    hash,
-    hash::ObjectId,
-    interrupt,
-    objs::bstr::ByteVec,
-    odb::{pack, pack::FindExt},
-    parallel::InOrderIter,
-    prelude::Finalize,
-    progress, traverse, Progress,
+    hash, hash::ObjectId, interrupt, objs::bstr::ByteVec, odb::pack, parallel::InOrderIter, prelude::Finalize,
+    progress, traverse, Count, NestedProgress, Progress,
 };
 
 use crate::OutputFormat;
@@ -109,17 +103,16 @@ pub fn create<W, P>(
 ) -> anyhow::Result<()>
 where
     W: std::io::Write,
-    P: Progress,
+    P: NestedProgress,
     P::SubProgress: 'static,
 {
+    type ObjectIdIter = dyn Iterator<Item = Result<ObjectId, Box<dyn std::error::Error + Send + Sync>>> + Send;
+
     let repo = gix::discover(repository_path)?.into_sync();
     progress.init(Some(2), progress::steps());
     let tips = tips.into_iter();
     let make_cancellation_err = || anyhow!("Cancelled by user");
-    let (mut handle, input): (
-        _,
-        Box<dyn Iterator<Item = Result<ObjectId, input_iteration::Error>> + Send>,
-    ) = match input {
+    let (mut handle, mut input): (_, Box<ObjectIdIter>) = match input {
         None => {
             let mut progress = progress.add_child("traversing");
             progress.init(None, progress::count("commits"));
@@ -137,12 +130,9 @@ where
                 .collect::<Result<Vec<_>, _>>()?;
             let handle = repo.objects.into_shared_arc().to_cache_arc();
             let iter = Box::new(
-                traverse::commit::Ancestors::new(tips, traverse::commit::ancestors::State::default(), {
-                    let handle = handle.clone();
-                    move |oid, buf| handle.find_commit_iter(oid, buf).map(|t| t.0)
-                })
-                .map(|res| res.map_err(Into::into).map(|c| c.id))
-                .inspect(move |_| progress.inc()),
+                traverse::commit::Simple::new(tips, handle.clone())
+                    .map(|res| res.map_err(|err| Box::new(err) as Box<_>).map(|c| c.id))
+                    .inspect(move |_| progress.inc()),
             );
             (handle, iter)
         }
@@ -157,7 +147,7 @@ where
                         .lines()
                         .map(|hex_id| {
                             hex_id
-                                .map_err(Into::into)
+                                .map_err(|err| Box::new(err) as Box<_>)
                                 .and_then(|hex_id| ObjectId::from_hex(hex_id.as_bytes()).map_err(Into::into))
                         })
                         .inspect(move |_| progress.inc()),
@@ -179,7 +169,7 @@ where
             Some(1)
         };
         if nondeterministic_thread_count.is_some() && !may_use_multiple_threads {
-            progress.fail("Cannot use multi-threaded counting in tree-diff object expansion mode as it may yield way too many objects.");
+            progress.fail("Cannot use multi-threaded counting in tree-diff object expansion mode as it may yield way too many objects.".into());
         }
         let (_, _, thread_count) = gix::parallel::optimize_chunk_size_and_thread_limit(50, None, thread_limit, None);
         let progress = progress::ThroughputOnDrop::new(progress);
@@ -207,7 +197,7 @@ where
             pack::data::output::count::objects(
                 handle.clone(),
                 input,
-                progress,
+                &progress,
                 &interrupt::IS_INTERRUPTED,
                 pack::data::output::count::objects::Options {
                     thread_limit,
@@ -217,9 +207,9 @@ where
             )?
         } else {
             pack::data::output::count::objects_unthreaded(
-                handle.clone(),
-                input,
-                progress,
+                &handle,
+                &mut input,
+                &progress,
                 &interrupt::IS_INTERRUPTED,
                 input_object_expansion,
             )?
@@ -236,7 +226,7 @@ where
         InOrderIter::from(pack::data::output::entry::iter_from_counts(
             counts,
             handle,
-            progress,
+            Box::new(progress),
             pack::data::output::entry::iter_from_counts::Options {
                 thread_limit,
                 mode: pack::data::output::entry::iter_from_counts::Mode::PackCopyAndBaseObjects,
@@ -269,7 +259,7 @@ where
         pack::data::output::bytes::FromEntriesIter::new(
             in_order_entries.by_ref().inspect(|e| {
                 if let Ok(entries) = e {
-                    entries_progress.inc_by(entries.len())
+                    entries_progress.inc_by(entries.len());
                 }
             }),
             &mut pack_file,
@@ -371,7 +361,7 @@ pub mod input_iteration {
     #[derive(Debug, thiserror::Error)]
     pub enum Error {
         #[error("input objects couldn't be iterated completely")]
-        Iteration(#[from] traverse::commit::ancestors::Error),
+        Iteration(#[from] traverse::commit::simple::Error),
         #[error("An error occurred while reading hashes from standard input")]
         InputLinesIo(#[from] std::io::Error),
         #[error("Could not decode hex hash provided on standard input")]

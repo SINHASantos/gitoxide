@@ -26,7 +26,7 @@ mod method {
     fn verify_checksum() -> Result<(), Box<dyn std::error::Error>> {
         let p = pack_at(SMALL_PACK);
         assert_eq!(
-            p.verify_checksum(progress::Discard, &AtomicBool::new(false))?,
+            p.verify_checksum(&mut progress::Discard, &AtomicBool::new(false))?,
             p.checksum()
         );
         Ok(())
@@ -103,10 +103,16 @@ mod decode_entry {
         }
 
         let p = pack_at(SMALL_PACK);
-        let entry = p.entry(offset);
+        let entry = p.entry(offset).expect("valid object type");
         let mut buf = Vec::new();
-        p.decode_entry(entry, &mut buf, resolve_with_panic, &mut cache::Never)
-            .expect("valid offset provides valid entry");
+        p.decode_entry(
+            entry,
+            &mut buf,
+            &mut Default::default(),
+            &resolve_with_panic,
+            &mut cache::Never,
+        )
+        .expect("valid offset provides valid entry");
         buf
     }
 }
@@ -153,8 +159,8 @@ mod resolve_header {
         }
 
         let p = pack_at(SMALL_PACK);
-        let entry = p.entry(offset);
-        p.decode_header(entry, resolve_with_panic)
+        let entry = p.entry(offset).expect("valid object type");
+        p.decode_header(entry, &mut Default::default(), &resolve_with_panic)
             .expect("valid offset provides valid entry")
     }
 }
@@ -168,7 +174,7 @@ mod decompress_entry {
     fn commit() {
         let buf = decompress_entry_at_offset(1968);
         assert_eq!(buf.as_bstr(), b"tree e90926b07092bccb7bf7da445fae6ffdfacf3eae\nauthor Sebastian Thiel <byronimo@gmail.com> 1286529993 +0200\ncommitter Sebastian Thiel <byronimo@gmail.com> 1286529993 +0200\n\nInitial commit\n".as_bstr());
-        assert_eq!(buf.len(), 187)
+        assert_eq!(buf.len(), 187);
     }
 
     #[test]
@@ -179,13 +185,13 @@ mod decompress_entry {
             b"GitPython is a python library used to interact with Git repositories.\n\nHi there\n\nHello Other\n"
                 .as_bstr()
         );
-        assert_eq!(buf.len(), 93)
+        assert_eq!(buf.len(), 93);
     }
 
     #[test]
     fn blob_with_two_chain_links() {
         let buf = decompress_entry_at_offset(3033);
-        assert_eq!(buf.len(), 6, "it decompresses delta objects, but won't resolve them")
+        assert_eq!(buf.len(), 6, "it decompresses delta objects, but won't resolve them");
     }
 
     #[test]
@@ -202,11 +208,12 @@ mod decompress_entry {
 
     fn decompress_entry_at_offset(offset: u64) -> Vec<u8> {
         let p = pack_at(SMALL_PACK);
-        let entry = p.entry(offset);
+        let entry = p.entry(offset).expect("valid object type");
 
         let size = entry.decompressed_size as usize;
         let mut buf = vec![0; size];
-        p.decompress_entry(&entry, &mut buf).expect("valid offset");
+        p.decompress_entry(&entry, &mut Default::default(), &mut buf)
+            .expect("valid offset");
 
         buf.resize(entry.decompressed_size as usize, 0);
         buf

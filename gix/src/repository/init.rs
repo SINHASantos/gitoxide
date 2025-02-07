@@ -9,21 +9,23 @@ impl crate::Repository {
         common_dir: Option<std::path::PathBuf>,
         config: crate::config::Cache,
         linked_worktree_options: crate::open::Options,
-        index: crate::worktree::IndexStorage,
+        #[cfg(feature = "index")] index: crate::worktree::IndexStorage,
         shallow_commits: crate::shallow::CommitsStorage,
-        modules: crate::submodule::ModulesFileStorage,
+        #[cfg(feature = "attributes")] modules: crate::submodule::ModulesFileStorage,
     ) -> Self {
         setup_objects(&mut objects, &config);
         crate::Repository {
-            bufs: RefCell::new(Vec::with_capacity(4)),
+            bufs: Some(RefCell::new(Vec::with_capacity(4))),
             work_tree,
             common_dir,
             objects,
             refs,
             config,
             options: linked_worktree_options,
+            #[cfg(feature = "index")]
             index,
             shallow_commits,
+            #[cfg(feature = "attributes")]
             modules,
         }
     }
@@ -42,7 +44,7 @@ pub(crate) fn setup_objects(objects: &mut crate::OdbHandle, config: &crate::conf
             None => match config.static_pack_cache_limit_bytes {
                 None => objects.set_pack_cache(|| Box::<gix_pack::cache::lru::StaticLinkedList<64>>::default()),
                 Some(limit) => {
-                    objects.set_pack_cache(move || Box::new(gix_pack::cache::lru::StaticLinkedList::<64>::new(limit)))
+                    objects.set_pack_cache(move || Box::new(gix_pack::cache::lru::StaticLinkedList::<64>::new(limit)));
                 }
             },
             Some(0) => objects.unset_pack_cache(),

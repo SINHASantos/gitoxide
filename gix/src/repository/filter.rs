@@ -1,8 +1,8 @@
-use crate::{filter, repository::IndexPersistedOrInMemory, Id, Repository};
+use crate::{filter, worktree::IndexPersistedOrInMemory, Id, Repository};
 
 ///
 pub mod pipeline {
-    /// The error returned by [Repository::filter_pipeline()][super::Repository::filter_pipeline()].
+    /// The error returned by [Repository::filter_pipeline()](super::Repository::filter_pipeline()).
     #[derive(Debug, thiserror::Error)]
     #[allow(missing_docs)]
     pub enum Error {
@@ -11,7 +11,7 @@ pub mod pipeline {
         #[error(transparent)]
         DecodeCommit(#[from] gix_object::decode::Error),
         #[error("Could not create index from tree at HEAD^{{tree}}")]
-        TreeTraverse(#[from] gix_traverse::tree::breadthfirst::Error),
+        TreeTraverse(#[from] crate::repository::index_from_tree::Error),
         #[error(transparent)]
         BareAttributes(#[from] crate::config::attribute_stack::Error),
         #[error(transparent)]
@@ -24,7 +24,7 @@ pub mod pipeline {
 impl Repository {
     /// Configure a pipeline for converting byte buffers to the worktree representation, and byte streams to the git-internal
     /// representation. Also return the index that was used when initializing the pipeline as it may be useful when calling
-    /// [convert_to_git()][filter::Pipeline::convert_to_git()].
+    /// [convert_to_git()](filter::Pipeline::convert_to_git()).
     /// Bare repositories will either use `HEAD^{tree}` for accessing all relevant worktree files or the given `tree_if_bare`.
     ///
     /// Note that this is considered a primitive as it operates on data directly and will not have permanent effects.
@@ -52,13 +52,13 @@ impl Repository {
             let cache = self.attributes_only(&index, gix_worktree::stack::state::attributes::Source::IdMapping)?;
             (cache, IndexPersistedOrInMemory::InMemory(index))
         } else {
-            let index = self.index()?;
+            let index = self.index_or_empty()?;
             let cache = self.attributes_only(
                 &index,
                 gix_worktree::stack::state::attributes::Source::WorktreeThenIdMapping,
             )?;
             (cache, IndexPersistedOrInMemory::Persisted(index))
         };
-        Ok((filter::Pipeline::new(self, cache)?, index))
+        Ok((filter::Pipeline::new(self, cache.detach())?, index))
     }
 }

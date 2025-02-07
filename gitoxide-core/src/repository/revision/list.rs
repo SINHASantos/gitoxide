@@ -17,7 +17,7 @@ pub const PROGRESS_RANGE: std::ops::RangeInclusive<u8> = 0..=2;
 
 pub(crate) mod function {
     use anyhow::{bail, Context};
-    use gix::{hashtable::HashMap, traverse::commit::Sorting, Progress};
+    use gix::{hashtable::HashMap, revision::walk::Sorting, Progress};
     use layout::{
         backends::svg::SVGWriter,
         core::{base::Orientation, geometry::Point, style::StyleAttr},
@@ -49,10 +49,10 @@ pub(crate) mod function {
         let commits = id
             .object()?
             .peel_to_kind(gix::object::Kind::Commit)
-            .context("Need commitish as starting point")?
+            .context("Need committish as starting point")?
             .id()
             .ancestors()
-            .sorting(Sorting::ByCommitTimeNewestFirst)
+            .sorting(Sorting::ByCommitTime(Default::default()))
             .all()?;
 
         let mut vg = match text {
@@ -65,7 +65,7 @@ pub(crate) mod function {
             Format::Text => None,
         };
         progress.init(None, gix::progress::count("commits"));
-        progress.set_name("traverse");
+        progress.set_name("traverse".into());
 
         let start = std::time::Instant::now();
         for commit in commits {
@@ -108,7 +108,7 @@ pub(crate) mod function {
                 }
             }
             progress.inc();
-            if limit.map_or(false, |limit| limit == progress.step()) {
+            if limit.is_some_and(|limit| limit == progress.step()) {
                 break;
             }
         }
@@ -116,7 +116,7 @@ pub(crate) mod function {
         progress.show_throughput(start);
         if let Some((mut vg, path, _)) = vg {
             let start = std::time::Instant::now();
-            progress.set_name("layout graph");
+            progress.set_name("layout graph".into());
             progress.info(format!("writing {path:?}…"));
             let mut svg = SVGWriter::new();
             vg.do_it(false, false, false, &mut svg);

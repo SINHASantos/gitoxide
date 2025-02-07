@@ -9,7 +9,7 @@ use crate::{
     config,
     config::{
         cache::util::ApplyLeniency,
-        tree::{gitoxide, Core, Http},
+        tree::{gitoxide, Core, Gitoxide, Http},
         Cache,
     },
     open,
@@ -27,6 +27,8 @@ impl Cache {
             is_bare,
             object_hash,
             reflog: _,
+            precompose_unicode: _,
+            protect_windows: _,
         }: StageOne,
         git_dir: &std::path::Path,
         branch_name: Option<&gix_ref::FullNameRef>,
@@ -72,7 +74,7 @@ impl Cache {
 
         let config = {
             let git_prefix = &git_prefix;
-            let metas = [
+            let mut metas = [
                 gix_config::source::Kind::GitInstallation,
                 gix_config::source::Kind::System,
                 gix_config::source::Kind::Global,
@@ -100,7 +102,7 @@ impl Cache {
 
             let err_on_nonexisting_paths = false;
             let mut globals = gix_config::File::from_paths_metadata_buf(
-                metas,
+                &mut metas,
                 &mut buf,
                 err_on_nonexisting_paths,
                 gix_config::file::init::Options {
@@ -143,6 +145,7 @@ impl Cache {
 
         use util::config_bool;
         let reflog = util::query_refupdates(&config, lenient_config)?;
+        let refs_namespace = util::query_refs_namespace(&config, lenient_config)?;
         let ignore_case = config_bool(&config, &Core::IGNORE_CASE, "core.ignoreCase", false, lenient_config)?;
         let use_multi_pack_index = config_bool(
             &config,
@@ -151,6 +154,7 @@ impl Cache {
             true,
             lenient_config,
         )?;
+        #[cfg(feature = "revision")]
         let object_kind_hint = util::disambiguate_hint(&config, lenient_config)?;
         let (static_pack_cache_limit_bytes, pack_cache_bytes, object_cache_bytes) =
             util::parse_object_caches(&config, lenient_config, filter_config_section)?;
@@ -159,11 +163,13 @@ impl Cache {
             resolved: config.into(),
             use_multi_pack_index,
             object_hash,
+            #[cfg(feature = "revision")]
             object_kind_hint,
             static_pack_cache_limit_bytes,
             pack_cache_bytes,
             object_cache_bytes,
             reflog,
+            refs_namespace,
             is_bare,
             ignore_case,
             hex_len,
@@ -174,9 +180,11 @@ impl Cache {
             user_agent: Default::default(),
             personas: Default::default(),
             url_rewrite: Default::default(),
+            #[cfg(feature = "blob-diff")]
             diff_renames: Default::default(),
             #[cfg(any(feature = "blocking-network-client", feature = "async-network-client"))]
             url_scheme: Default::default(),
+            #[cfg(feature = "blob-diff")]
             diff_algorithm: Default::default(),
         })
     }
@@ -211,19 +219,28 @@ impl Cache {
             false,
             self.lenient_config,
         )?;
-        let object_kind_hint = util::disambiguate_hint(config, self.lenient_config)?;
+
+        #[cfg(feature = "revision")]
+        {
+            let object_kind_hint = util::disambiguate_hint(config, self.lenient_config)?;
+            self.object_kind_hint = object_kind_hint;
+        }
         let reflog = util::query_refupdates(config, self.lenient_config)?;
+        let refs_namespace = util::query_refs_namespace(config, self.lenient_config)?;
 
         self.hex_len = hex_len;
         self.ignore_case = ignore_case;
-        self.object_kind_hint = object_kind_hint;
         self.reflog = reflog;
+        self.refs_namespace = refs_namespace;
 
         self.user_agent = Default::default();
         self.personas = Default::default();
         self.url_rewrite = Default::default();
-        self.diff_renames = Default::default();
-        self.diff_algorithm = Default::default();
+        #[cfg(feature = "blob-diff")]
+        {
+            self.diff_renames = Default::default();
+            self.diff_algorithm = Default::default();
+        }
         (
             self.static_pack_cache_limit_bytes,
             self.pack_cache_bytes,
@@ -287,6 +304,7 @@ impl crate::Repository {
 
     fn apply_changed_values(&mut self) {
         self.refs.write_reflog = util::reflog_or_default(self.config.reflog, self.work_dir().is_some());
+        self.refs.namespace.clone_from(&self.config.refs_namespace);
     }
 }
 
@@ -309,6 +327,15 @@ fn apply_environment_overrides(
     let mut env_override = gix_config::File::new(gix_config::file::Metadata::from(gix_config::Source::EnvOverride));
     for (section_name, subsection_name, permission, data) in [
         (
+            "core",
+            None,
+            git_prefix,
+            &[{
+                let key = &Core::WORKTREE;
+                (env(key), key.name)
+            }][..],
+        ),
+        (
             "http",
             None,
             http_transport,
@@ -325,6 +352,15 @@ fn apply_environment_overrides(
                     (env(key), key.name)
                 },
             ][..],
+        ),
+        (
+            "gitoxide",
+            None,
+            git_prefix,
+            &[{
+                let key = &Gitoxide::TRACE_PACKET;
+                (env(key), key.name)
+            }],
         ),
         (
             "gitoxide",
@@ -366,6 +402,30 @@ fn apply_environment_overrides(
         ),
         (
             "gitoxide",
+            Some(Cow::Borrowed("http".into())),
+            git_prefix,
+            &[{
+                let key = &gitoxide::Http::SSL_NO_VERIFY;
+                (env(key), key.name)
+            }],
+        ),
+        (
+            "gitoxide",
+            Some(Cow::Borrowed("credentials".into())),
+            git_prefix,
+            &[
+                {
+                    let key = &gitoxide::Credentials::TERMINAL_PROMPT;
+                    (env(key), key.name)
+                },
+                {
+                    let key = &gitoxide::Credentials::HELPER_STDERR;
+                    (env(key), key.name)
+                },
+            ],
+        ),
+        (
+            "gitoxide",
             Some(Cow::Borrowed("committer".into())),
             identity,
             &[
@@ -383,10 +443,20 @@ fn apply_environment_overrides(
             "gitoxide",
             Some(Cow::Borrowed("core".into())),
             git_prefix,
-            &[{
-                let key = &gitoxide::Core::SHALLOW_FILE;
-                (env(key), key.name)
-            }],
+            &[
+                {
+                    let key = &gitoxide::Core::SHALLOW_FILE;
+                    (env(key), key.name)
+                },
+                {
+                    let key = &gitoxide::Core::REFS_NAMESPACE;
+                    (env(key), key.name)
+                },
+                {
+                    let key = &gitoxide::Core::EXTERNAL_COMMAND_STDERR;
+                    (env(key), key.name)
+                },
+            ],
         ),
         (
             "gitoxide",
@@ -486,6 +556,16 @@ fn apply_environment_overrides(
             git_prefix,
             &[{
                 let key = &config::tree::Ssh::VARIANT;
+                (env(key), key.name)
+            }],
+        ),
+        #[cfg(feature = "blob-diff")]
+        (
+            "diff",
+            None,
+            git_prefix,
+            &[{
+                let key = &config::tree::Diff::EXTERNAL;
                 (env(key), key.name)
             }],
         ),

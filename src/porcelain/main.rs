@@ -3,27 +3,24 @@ use std::sync::{
     Arc,
 };
 
-use anyhow::Result;
-use clap::Parser;
+use crate::shared::pretty::prepare_and_run;
+use anyhow::{anyhow, Result};
+use clap::{CommandFactory, Parser};
 use gitoxide_core as core;
 
-use crate::{
-    porcelain::options::{Args, Subcommands},
-    shared::pretty::prepare_and_run,
-};
+use crate::porcelain::options::{Args, Subcommands};
 
 pub fn main() -> Result<()> {
     let args: Args = Args::parse_from(gix::env::args_os());
+    let should_interrupt = Arc::new(AtomicBool::new(false));
     #[allow(unsafe_code)]
     unsafe {
-        // SAFETY: we don't manipulate the environment from any thread
-        time::util::local_offset::set_soundness(time::util::local_offset::Soundness::Unsound);
+        // SAFETY: The closure doesn't use mutexes or memory allocation, so it should be safe to call from a signal handler.
+        gix::interrupt::init_handler(1, {
+            let should_interrupt = Arc::clone(&should_interrupt);
+            move || should_interrupt.store(true, Ordering::SeqCst)
+        })?;
     }
-    let should_interrupt = Arc::new(AtomicBool::new(false));
-    gix::interrupt::init_handler(1, {
-        let should_interrupt = Arc::clone(&should_interrupt);
-        move || should_interrupt.store(true, Ordering::SeqCst)
-    })?;
     let trace = false;
     let verbose = !args.quiet;
     let progress = args.progress;
@@ -60,11 +57,11 @@ pub fn main() -> Result<()> {
                     progress,
                     progress_keep_open,
                     crate::shared::STANDARD_RANGE,
-                    move |mut progress, out, mut err| {
+                    move |mut progress, out, err| {
                         let engine = query::prepare(
                             &repo_dir,
                             &mut progress,
-                            &mut err,
+                            &mut *err,
                             query::Options {
                                 object_cache_size_mb,
                                 find_copies_harder,
@@ -167,6 +164,21 @@ pub fn main() -> Result<()> {
                 )
             }
         },
+        Subcommands::Completions { shell, out_dir } => {
+            let mut app = Args::command();
+
+            let shell = shell
+                .or_else(clap_complete::Shell::from_env)
+                .ok_or_else(|| anyhow!("The shell could not be derived from the environment"))?;
+
+            let bin_name = app.get_name().to_owned();
+            if let Some(out_dir) = out_dir {
+                clap_complete::generate_to(shell, &mut app, bin_name, &out_dir)?;
+            } else {
+                clap_complete::generate(shell, &mut app, bin_name, &mut std::io::stdout());
+            }
+            Ok(())
+        }
     }?;
     Ok(())
 }

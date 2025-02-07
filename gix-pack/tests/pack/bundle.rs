@@ -1,5 +1,6 @@
 mod locate {
     use bstr::ByteSlice;
+    use gix_features::zlib;
     use gix_object::Kind;
     use gix_odb::pack;
 
@@ -8,13 +9,19 @@ mod locate {
     fn locate<'a>(hex_id: &str, out: &'a mut Vec<u8>) -> gix_object::Data<'a> {
         let bundle = pack::Bundle::at(fixture_path(SMALL_PACK_INDEX), gix_hash::Kind::Sha1).expect("pack and idx");
         bundle
-            .find(hex_to_id(hex_id), out, &mut pack::cache::Never)
+            .find(
+                &hex_to_id(hex_id),
+                out,
+                &mut zlib::Inflate::default(),
+                &mut pack::cache::Never,
+            )
             .expect("read success")
             .expect("id present")
             .0
     }
 
     mod locate_and_verify {
+        use gix_features::zlib;
         use gix_odb::pack;
 
         use crate::{fixture_path, pack::PACKS_AND_INDICES};
@@ -29,9 +36,14 @@ mod locate {
                 let mut buf = Vec::new();
                 for entry in bundle.index.iter() {
                     let (obj, _location) = bundle
-                        .find(entry.oid, &mut buf, &mut pack::cache::Never)?
+                        .find(
+                            &entry.oid,
+                            &mut buf,
+                            &mut zlib::Inflate::default(),
+                            &mut pack::cache::Never,
+                        )?
                         .expect("id present");
-                    obj.verify_checksum(entry.oid)?;
+                    obj.verify_checksum(&entry.oid)?;
                 }
             }
             Ok(())
@@ -153,12 +165,12 @@ mod write_to_directory {
         let pack_file = fs::File::open(fixture_path(pack_file))?;
         static SHOULD_INTERRUPT: AtomicBool = AtomicBool::new(false);
         pack::Bundle::write_to_directory_eagerly(
-            pack_file,
+            Box::new(pack_file),
             None,
             directory,
-            progress::Discard,
+            &mut progress::Discard,
             &SHOULD_INTERRUPT,
-            None,
+            None::<gix_object::find::Never>,
             pack::bundle::write::Options {
                 thread_limit: None,
                 iteration_mode: pack::data::input::Mode::Verify,

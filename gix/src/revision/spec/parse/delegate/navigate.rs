@@ -1,11 +1,11 @@
 use std::collections::HashSet;
 
 use gix_hash::ObjectId;
+use gix_index::entry::Stage;
 use gix_revision::spec::parse::{
     delegate,
     delegate::{PeelTo, Traversal},
 };
-use gix_traverse::commit::Sorting;
 
 use crate::{
     bstr::{BStr, ByteSlice},
@@ -18,7 +18,7 @@ use crate::{
     Object,
 };
 
-impl<'repo> delegate::Navigate for Delegate<'repo> {
+impl delegate::Navigate for Delegate<'_> {
     fn traverse(&mut self, kind: Traversal) -> Option<()> {
         self.unset_disambiguate_call();
         self.follow_refs_to_objects_if_needed()?;
@@ -121,7 +121,7 @@ impl<'repo> delegate::Navigate for Delegate<'repo> {
                 let lookup_path = |obj: &ObjectId| {
                     let tree_id = peel(repo, obj, gix_object::Kind::Tree)?;
                     if path.is_empty() {
-                        return Ok(tree_id);
+                        return Ok((tree_id, gix_object::tree::EntryKind::Tree.into()));
                     }
                     let mut tree = repo.find_object(tree_id)?.into_tree();
                     let entry =
@@ -131,11 +131,17 @@ impl<'repo> delegate::Navigate for Delegate<'repo> {
                                 object: obj.attach(repo).shorten_or_id(),
                                 tree: tree_id.attach(repo).shorten_or_id(),
                             })?;
-                    Ok(entry.object_id())
+                    Ok((entry.object_id(), entry.mode()))
                 };
                 for obj in objs.iter() {
                     match lookup_path(obj) {
-                        Ok(replace) => replacements.push((*obj, replace)),
+                        Ok((replace, mode)) => {
+                            if !path.is_empty() {
+                                // Technically this is letting the last one win, but so be it.
+                                self.paths[self.idx] = Some((path.to_owned(), mode));
+                            }
+                            replacements.push((*obj, replace));
+                        }
                         Err(err) => errors.push((*obj, err)),
                     }
                 }
@@ -157,9 +163,9 @@ impl<'repo> delegate::Navigate for Delegate<'repo> {
         self.unset_disambiguate_call();
         self.follow_refs_to_objects_if_needed()?;
 
-        #[cfg(not(feature = "regex"))]
+        #[cfg(not(feature = "revparse-regex"))]
         let matches = |message: &BStr| -> bool { message.contains_str(regex) ^ negated };
-        #[cfg(feature = "regex")]
+        #[cfg(feature = "revparse-regex")]
         let matches = match regex::bytes::Regex::new(regex.to_str_lossy().as_ref()) {
             Ok(compiled) => {
                 let needs_regex = regex::escape(compiled.as_str()) != regex;
@@ -186,7 +192,7 @@ impl<'repo> delegate::Navigate for Delegate<'repo> {
                     match oid
                         .attach(repo)
                         .ancestors()
-                        .sorting(Sorting::ByCommitTimeNewestFirst)
+                        .sorting(crate::revision::walk::Sorting::ByCommitTime(Default::default()))
                         .all()
                     {
                         Ok(iter) => {
@@ -218,7 +224,7 @@ impl<'repo> delegate::Navigate for Delegate<'repo> {
                                         commits_searched: count,
                                         oid: oid.attach(repo).shorten_or_id(),
                                     },
-                                ))
+                                ));
                             }
                         }
                         Err(err) => errors.push((*oid, err.into())),
@@ -234,16 +240,12 @@ impl<'repo> delegate::Navigate for Delegate<'repo> {
                             .rev_walk(
                                 references
                                     .peeled()
+                                    .ok()?
                                     .filter_map(Result::ok)
-                                    .filter(|r| {
-                                        r.id()
-                                            .object()
-                                            .ok()
-                                            .map_or(false, |obj| obj.kind == gix_object::Kind::Commit)
-                                    })
+                                    .filter(|r| r.id().header().ok().is_some_and(|obj| obj.kind().is_commit()))
                                     .filter_map(|r| r.detach().peeled),
                             )
-                            .sorting(Sorting::ByCommitTimeNewestFirst)
+                            .sorting(crate::revision::walk::Sorting::ByCommitTime(Default::default()))
                             .all()
                         {
                             Ok(iter) => {
@@ -299,31 +301,44 @@ impl<'repo> delegate::Navigate for Delegate<'repo> {
     }
 
     fn index_lookup(&mut self, path: &BStr, stage: u8) -> Option<()> {
+        let stage = match stage {
+            0 => Stage::Unconflicted,
+            1 => Stage::Base,
+            2 => Stage::Ours,
+            3 => Stage::Theirs,
+            _ => unreachable!(
+                "BUG: driver will not pass invalid stages (and it uses integer to avoid gix-index as dependency)"
+            ),
+        };
         self.unset_disambiguate_call();
         match self.repo.index() {
-            Ok(index) => match index.entry_by_path_and_stage(path, stage.into()) {
+            Ok(index) => match index.entry_by_path_and_stage(path, stage) {
                 Some(entry) => {
                     self.objs[self.idx]
                         .get_or_insert_with(HashSet::default)
                         .insert(entry.id);
+
+                    self.paths[self.idx] = Some((
+                        path.to_owned(),
+                        entry
+                            .mode
+                            .to_tree_entry_mode()
+                            .unwrap_or(gix_object::tree::EntryKind::Blob.into()),
+                    ));
                     Some(())
                 }
                 None => {
-                    let stage_hint = [0, 1, 2]
+                    let stage_hint = [Stage::Unconflicted, Stage::Base, Stage::Ours]
                         .iter()
                         .filter(|our_stage| **our_stage != stage)
-                        .find_map(|stage| {
-                            index
-                                .entry_index_by_path_and_stage(path, (*stage).into())
-                                .map(|_| (*stage).into())
-                        });
+                        .find_map(|stage| index.entry_index_by_path_and_stage(path, *stage).map(|_| *stage));
                     let exists = self
                         .repo
                         .work_dir()
-                        .map_or(false, |root| root.join(gix_path::from_bstr(path)).exists());
+                        .is_some_and(|root| root.join(gix_path::from_bstr(path)).exists());
                     self.err.push(Error::IndexLookup {
                         desired_path: path.into(),
-                        desired_stage: stage.into(),
+                        desired_stage: stage,
                         exists,
                         stage_hint,
                     });

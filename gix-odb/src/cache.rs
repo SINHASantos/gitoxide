@@ -141,29 +141,35 @@ mod impls {
 
     use crate::{find::Header, pack::data::entry::Location, Cache};
 
-    impl<S> crate::Write for Cache<S>
+    impl<S> gix_object::Write for Cache<S>
     where
-        S: crate::Write,
+        S: gix_object::Write,
     {
-        type Error = S::Error;
-
-        fn write_stream(&self, kind: Kind, size: u64, from: impl Read) -> Result<ObjectId, Self::Error> {
+        fn write_stream(
+            &self,
+            kind: Kind,
+            size: u64,
+            from: &mut dyn Read,
+        ) -> Result<ObjectId, gix_object::write::Error> {
             self.inner.write_stream(kind, size, from)
         }
     }
 
-    impl<S> crate::Find for Cache<S>
+    impl<S> gix_object::Find for Cache<S>
     where
         S: gix_pack::Find,
     {
-        type Error = S::Error;
-
-        fn contains(&self, id: impl AsRef<oid>) -> bool {
-            self.inner.contains(id)
-        }
-
-        fn try_find<'a>(&self, id: impl AsRef<oid>, buffer: &'a mut Vec<u8>) -> Result<Option<Data<'a>>, Self::Error> {
+        fn try_find<'a>(&self, id: &oid, buffer: &'a mut Vec<u8>) -> Result<Option<Data<'a>>, gix_object::find::Error> {
             gix_pack::Find::try_find(self, id, buffer).map(|t| t.map(|t| t.0))
+        }
+    }
+
+    impl<S> gix_object::Exists for Cache<S>
+    where
+        S: gix_pack::Find,
+    {
+        fn exists(&self, id: &oid) -> bool {
+            self.inner.contains(id)
         }
     }
 
@@ -171,9 +177,16 @@ mod impls {
     where
         S: crate::Header,
     {
-        type Error = S::Error;
+        fn try_header(&self, id: &oid) -> Result<Option<Header>, gix_object::find::Error> {
+            self.inner.try_header(id)
+        }
+    }
 
-        fn try_header(&self, id: impl AsRef<oid>) -> Result<Option<Header>, Self::Error> {
+    impl<S> gix_object::FindHeader for Cache<S>
+    where
+        S: gix_object::FindHeader,
+    {
+        fn try_header(&self, id: &oid) -> Result<Option<gix_object::Header>, gix_object::find::Error> {
             self.inner.try_header(id)
         }
     }
@@ -182,17 +195,15 @@ mod impls {
     where
         S: gix_pack::Find,
     {
-        type Error = S::Error;
-
-        fn contains(&self, id: impl AsRef<oid>) -> bool {
+        fn contains(&self, id: &oid) -> bool {
             self.inner.contains(id)
         }
 
         fn try_find<'a>(
             &self,
-            id: impl AsRef<oid>,
+            id: &oid,
             buffer: &'a mut Vec<u8>,
-        ) -> Result<Option<(Data<'a>, Option<Location>)>, Self::Error> {
+        ) -> Result<Option<(Data<'a>, Option<Location>)>, gix_object::find::Error> {
             match self.pack_cache.as_ref().map(RefCell::borrow_mut) {
                 Some(mut pack_cache) => self.try_find_cached(id, buffer, pack_cache.deref_mut()),
                 None => self.try_find_cached(id, buffer, &mut gix_pack::cache::Never),
@@ -201,10 +212,10 @@ mod impls {
 
         fn try_find_cached<'a>(
             &self,
-            id: impl AsRef<oid>,
+            id: &oid,
             buffer: &'a mut Vec<u8>,
-            pack_cache: &mut impl gix_pack::cache::DecodeEntry,
-        ) -> Result<Option<(Data<'a>, Option<gix_pack::data::entry::Location>)>, Self::Error> {
+            pack_cache: &mut dyn gix_pack::cache::DecodeEntry,
+        ) -> Result<Option<(Data<'a>, Option<gix_pack::data::entry::Location>)>, gix_object::find::Error> {
             if let Some(mut obj_cache) = self.object_cache.as_ref().map(RefCell::borrow_mut) {
                 if let Some(kind) = obj_cache.get(&id.as_ref().to_owned(), buffer) {
                     return Ok(Some((Data::new(kind, buffer), None)));
@@ -219,7 +230,7 @@ mod impls {
             Ok(possibly_obj)
         }
 
-        fn location_by_oid(&self, id: impl AsRef<oid>, buf: &mut Vec<u8>) -> Option<gix_pack::data::entry::Location> {
+        fn location_by_oid(&self, id: &oid, buf: &mut Vec<u8>) -> Option<gix_pack::data::entry::Location> {
             self.inner.location_by_oid(id, buf)
         }
 

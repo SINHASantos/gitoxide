@@ -1,14 +1,21 @@
-pub mod util;
-
+#![allow(clippy::result_large_err)]
 mod with_overrides {
     use std::borrow::Cow;
 
+    use gix::{Repository, ThreadSafeRepository};
     use gix_object::bstr::BStr;
     use gix_sec::Permission;
     use gix_testtools::Env;
     use serial_test::serial;
 
-    use crate::util::named_subrepo_opts;
+    pub fn named_subrepo_opts(
+        fixture: &str,
+        name: &str,
+        opts: gix::open::Options,
+    ) -> std::result::Result<Repository, gix::open::Error> {
+        let repo_path = gix_testtools::scripted_fixture_read_only(fixture).unwrap().join(name);
+        Ok(ThreadSafeRepository::open_opts(repo_path, opts)?.to_thread_local())
+    }
 
     #[test]
     #[serial]
@@ -19,6 +26,7 @@ mod with_overrides {
             .set("GIT_HTTP_LOW_SPEED_LIMIT", "1")
             .set("GIT_HTTP_LOW_SPEED_TIME", "1")
             .set("GIT_HTTP_PROXY_AUTHMETHOD", "proxy-auth-method-env")
+            .set("GIT_SSL_NO_VERIFY", "true")
             .set("GIT_CURL_VERBOSE", "true")
             .set("https_proxy", "https-lower-override")
             .set("HTTPS_PROXY", "https-upper")
@@ -37,8 +45,10 @@ mod with_overrides {
             .set("GIT_AUTHOR_EMAIL", "author email")
             .set("GIT_AUTHOR_DATE", default_date)
             .set("EMAIL", "user email")
-            .set("GITOXIDE_PACK_CACHE_MEMORY", "0")
-            .set("GITOXIDE_OBJECT_CACHE_MEMORY", "5m")
+            .set("GIX_PACK_CACHE_MEMORY", "0")
+            .set("GIX_OBJECT_CACHE_MEMORY", "5m")
+            .set("GIX_CREDENTIALS_HELPER_STDERR", "creds-stderr")
+            .set("GIX_EXTERNAL_COMMAND_STDERR", "filter-stderr")
             .set("GIT_SSL_CAINFO", "./env.pem")
             .set("GIT_SSL_VERSION", "tlsv1.3")
             .set("GIT_SSH_VARIANT", "ssh-variant-env")
@@ -48,7 +58,10 @@ mod with_overrides {
             .set("GIT_GLOB_PATHSPECS", "pathspecs-glob")
             .set("GIT_NOGLOB_PATHSPECS", "pathspecs-noglob")
             .set("GIT_ICASE_PATHSPECS", "pathspecs-icase")
-            .set("GIT_SHALLOW_FILE", "shallow-file-env");
+            .set("GIT_TERMINAL_PROMPT", "42")
+            .set("GIT_SHALLOW_FILE", "shallow-file-env")
+            .set("GIT_NAMESPACE", "namespace-env")
+            .set("GIT_EXTERNAL_DIFF", "external-diff-env");
         let mut opts = gix::open::Options::isolated()
             .cli_overrides([
                 "http.userAgent=agent-from-cli",
@@ -61,6 +74,7 @@ mod with_overrides {
                 "gitoxide.ssh.commandWithoutShellFallback=ssh-command-fallback-cli",
                 "gitoxide.http.proxyAuthMethod=proxy-auth-method-cli",
                 "gitoxide.core.shallowFile=shallow-file-cli",
+                "gitoxide.core.refsNamespace=namespace-cli",
             ])
             .config_overrides([
                 "http.userAgent=agent-from-api",
@@ -73,6 +87,7 @@ mod with_overrides {
                 "gitoxide.ssh.commandWithoutShellFallback=ssh-command-fallback-api",
                 "gitoxide.http.proxyAuthMethod=proxy-auth-method-api",
                 "gitoxide.core.shallowFile=shallow-file-api",
+                "gitoxide.core.refsNamespace=namespace-api",
             ]);
         opts.permissions.env.git_prefix = Permission::Allow;
         opts.permissions.env.http_transport = Permission::Allow;
@@ -86,9 +101,7 @@ mod with_overrides {
         );
         let config = repo.config_snapshot();
         assert_eq!(
-            config
-                .strings_by_key("gitoxide.core.shallowFile")
-                .expect("at least one value"),
+            config.strings("gitoxide.core.shallowFile").expect("at least one value"),
             [
                 cow_bstr("shallow-file-cli"),
                 cow_bstr("shallow-file-api"),
@@ -96,7 +109,17 @@ mod with_overrides {
             ]
         );
         assert_eq!(
-            config.strings_by_key("http.userAgent").expect("at least one value"),
+            config
+                .strings("gitoxide.core.refsNamespace")
+                .expect("at least one value"),
+            [
+                cow_bstr("namespace-cli"),
+                cow_bstr("namespace-api"),
+                cow_bstr("namespace-env")
+            ]
+        );
+        assert_eq!(
+            config.strings("http.userAgent").expect("at least one value"),
             [
                 cow_bstr("agentJustForHttp"),
                 cow_bstr("agent-from-cli"),
@@ -105,30 +128,20 @@ mod with_overrides {
             ]
         );
         assert_eq!(
-            config
-                .integers_by_key("http.lowSpeedLimit")
-                .transpose()?
-                .expect("many values"),
+            config.integers("http.lowSpeedLimit").transpose()?.expect("many values"),
             [5120, 3, 2, 1]
         );
         assert_eq!(
-            config
-                .integers_by_key("http.lowSpeedTime")
-                .transpose()?
-                .expect("many values"),
+            config.integers("http.lowSpeedTime").transpose()?.expect("many values"),
             [10, 3, 2, 1]
         );
         assert_eq!(
-            config
-                .strings_by_key("http.proxyAuthMethod")
-                .expect("at least one value"),
+            config.strings("http.proxyAuthMethod").expect("at least one value"),
             [cow_bstr("basic")],
             "this value isn't overridden directly"
         );
         assert_eq!(
-            config
-                .strings_by_key("gitoxide.https.proxy")
-                .expect("at least one value"),
+            config.strings("gitoxide.https.proxy").expect("at least one value"),
             [
                 cow_bstr("https-upper"),
                 cow_bstr(if cfg!(windows) {
@@ -139,31 +152,25 @@ mod with_overrides {
             ]
         );
         assert_eq!(
-            config
-                .strings_by_key("gitoxide.http.proxy")
-                .expect("at least one value"),
+            config.strings("gitoxide.http.proxy").expect("at least one value"),
             [cow_bstr("http-lower")]
         );
         assert_eq!(
-            config
-                .strings_by_key("gitoxide.http.allProxy")
-                .expect("at least one value"),
+            config.strings("gitoxide.http.allProxy").expect("at least one value"),
             [
                 cow_bstr("all-proxy"), // on windows, environment variables are case-insensitive
                 cow_bstr(if cfg!(windows) { "all-proxy" } else { "all-proxy-lower" })
             ]
         );
         assert_eq!(
-            config
-                .strings_by_key("gitoxide.http.noProxy")
-                .expect("at least one value"),
+            config.strings("gitoxide.http.noProxy").expect("at least one value"),
             [
                 cow_bstr("no-proxy"), // on windows, environment variables are case-insensitive
                 cow_bstr(if cfg!(windows) { "no-proxy" } else { "no-proxy-lower" })
             ]
         );
         assert_eq!(
-            config.strings_by_key("http.sslCAInfo").expect("at least one value"),
+            config.strings("http.sslCAInfo").expect("at least one value"),
             [
                 cow_bstr("./CA.pem"),
                 cow_bstr("./cli.pem"),
@@ -172,7 +179,7 @@ mod with_overrides {
             ]
         );
         assert_eq!(
-            config.strings_by_key("http.sslVersion").expect("at least one value"),
+            config.strings("http.sslVersion").expect("at least one value"),
             [
                 cow_bstr("sslv2"),
                 cow_bstr("sslv3"),
@@ -181,7 +188,7 @@ mod with_overrides {
             ]
         );
         assert_eq!(
-            config.strings_by_key("ssh.variant").expect("at least one value"),
+            config.strings("ssh.variant").expect("at least one value"),
             [
                 cow_bstr("ssh-variant-cli"),
                 cow_bstr("ssh-variant-api"),
@@ -189,7 +196,7 @@ mod with_overrides {
             ]
         );
         assert_eq!(
-            config.strings_by_key("core.sshCommand").expect("at least one value"),
+            config.strings("core.sshCommand").expect("at least one value"),
             [
                 cow_bstr("ssh-command-cli"),
                 cow_bstr("ssh-command-api"),
@@ -198,7 +205,7 @@ mod with_overrides {
         );
         assert_eq!(
             config
-                .strings_by_key("gitoxide.ssh.commandWithoutShellFallback")
+                .strings("gitoxide.ssh.commandWithoutShellFallback")
                 .expect("at least one value"),
             [
                 cow_bstr("ssh-command-fallback-cli"),
@@ -208,7 +215,7 @@ mod with_overrides {
         );
         assert_eq!(
             config
-                .strings_by_key("gitoxide.http.proxyAuthMethod")
+                .strings("gitoxide.http.proxyAuthMethod")
                 .expect("at least one value"),
             [
                 cow_bstr("proxy-auth-method-cli"),
@@ -217,9 +224,12 @@ mod with_overrides {
             ]
         );
         for (key, expected) in [
+            ("gitoxide.http.sslNoVerify", "true"),
             ("gitoxide.http.verbose", "true"),
             ("gitoxide.allow.protocolFromUser", "file-allowed"),
             ("core.useReplaceRefs", "no-replace"),
+            #[cfg(feature = "blob-diff")]
+            ("diff.external", "external-diff-env"),
             ("gitoxide.objects.replaceRefBase", "refs/replace-mine"),
             ("gitoxide.committer.nameFallback", "committer name"),
             ("gitoxide.committer.emailFallback", "committer email"),
@@ -234,10 +244,13 @@ mod with_overrides {
             ("gitoxide.pathspec.glob", "pathspecs-glob"),
             ("gitoxide.pathspec.noglob", "pathspecs-noglob"),
             ("gitoxide.pathspec.literal", "pathspecs-literal"),
+            ("gitoxide.credentials.terminalPrompt", "42"),
+            ("gitoxide.credentials.helperStderr", "creds-stderr"),
+            ("gitoxide.core.externalCommandStderr", "filter-stderr"),
         ] {
             assert_eq!(
                 config
-                    .string_by_key(key)
+                    .string(key)
                     .unwrap_or_else(|| panic!("no value for {key}"))
                     .as_ref(),
                 expected,

@@ -2,7 +2,6 @@
 use std::path::{Path, PathBuf};
 
 use bstr::{BStr, ByteSlice};
-use gix_hash::oid;
 
 use super::Stack;
 use crate::PathIdMapping;
@@ -16,6 +15,7 @@ pub struct Statistics {
     /// Information about the stack delegate.
     pub delegate: delegate::Statistics,
     /// Information about attributes
+    #[cfg(feature = "attributes")]
     pub attributes: state::attributes::Statistics,
     /// Information about the ignore stack
     pub ignore: state::ignore::Statistics,
@@ -24,13 +24,17 @@ pub struct Statistics {
 #[derive(Clone)]
 pub enum State {
     /// Useful for checkout where directories need creation, but we need to access attributes as well.
+    #[cfg(feature = "attributes")]
     CreateDirectoryAndAttributesStack {
         /// If there is a symlink or a file in our path, try to unlink it before creating the directory.
         unlink_on_collision: bool,
+        /// Options to control how newly created path components should be validated.
+        validate: gix_validate::path::component::Options,
         /// State to handle attribute information
         attributes: state::Attributes,
     },
     /// Used when adding files, requiring access to both attributes and ignore information, for example during add operations.
+    #[cfg(feature = "attributes")]
     AttributesAndIgnoreStack {
         /// State to handle attribute information
         attributes: state::Attributes,
@@ -38,6 +42,7 @@ pub enum State {
         ignore: state::Ignore,
     },
     /// Used when only attributes are required, typically with fully virtual worktrees.
+    #[cfg(feature = "attributes")]
     AttributesStack(state::Attributes),
     /// Used when providing worktree status information.
     IgnoreStack(state::Ignore),
@@ -73,70 +78,95 @@ impl Stack {
             statistics: Statistics::default(),
         }
     }
+
+    /// Create a new stack that takes into consideration the `ignore_case` result of a filesystem probe in `root`. It takes a configured
+    /// `state` to control what it can do, while initializing attribute or ignore files that are to be queried from the ODB using
+    /// `index` and `path_backing`.
+    ///
+    /// This is the easiest way to correctly setup a stack.
+    pub fn from_state_and_ignore_case(
+        root: impl Into<PathBuf>,
+        ignore_case: bool,
+        state: State,
+        index: &gix_index::State,
+        path_backing: &gix_index::PathStorageRef,
+    ) -> Self {
+        let case = if ignore_case {
+            gix_glob::pattern::Case::Fold
+        } else {
+            gix_glob::pattern::Case::Sensitive
+        };
+        let attribute_files = state.id_mappings_from_index(index, path_backing, case);
+        Stack::new(root, state, case, Vec::with_capacity(512), attribute_files)
+    }
 }
 
 /// Entry points for attribute query
 impl Stack {
     /// Append the `relative` path to the root directory of the cache and efficiently create leading directories, while assuring that no
     /// symlinks are in that path.
-    /// Unless `is_dir` is known with `Some(…)`, then `relative` points to a directory itself in which case the entire resulting
-    /// path is created as directory. If it's not known it is assumed to be a file.
-    /// `find` maybe used to lookup objects from an [id mapping][crate::stack::State::id_mappings_from_index()], with mappnigs
+    /// Unless `mode` is known with `Some(gix_index::entry::Mode::DIR|COMMIT)`,
+    /// then `relative` points to a directory itself in which case the entire resulting path is created as directory.
+    /// If it's not known it is assumed to be a file.
+    /// `objects` maybe used to lookup objects from an [id mapping][crate::stack::State::id_mappings_from_index()], with mappnigs
     ///
     /// Provide access to cached information for that `relative` path via the returned platform.
-    pub fn at_path<Find, E>(
+    pub fn at_path(
         &mut self,
         relative: impl AsRef<Path>,
-        is_dir: Option<bool>,
-        find: Find,
-    ) -> std::io::Result<Platform<'_>>
-    where
-        Find: for<'a> FnMut(&oid, &'a mut Vec<u8>) -> Result<gix_object::BlobRef<'a>, E>,
-        E: std::error::Error + Send + Sync + 'static,
-    {
+        mode: Option<gix_index::entry::Mode>,
+        objects: &dyn gix_object::Find,
+    ) -> std::io::Result<Platform<'_>> {
         self.statistics.platforms += 1;
         let mut delegate = StackDelegate {
             state: &mut self.state,
             buf: &mut self.buf,
-            is_dir: is_dir.unwrap_or(false),
+            mode,
             id_mappings: &self.id_mappings,
-            find,
+            objects,
             case: self.case,
             statistics: &mut self.statistics,
         };
-        self.stack.make_relative_path_current(relative, &mut delegate)?;
-        Ok(Platform { parent: self, is_dir })
+        self.stack
+            .make_relative_path_current(relative.as_ref(), &mut delegate)?;
+        Ok(Platform {
+            parent: self,
+            is_dir: mode_is_dir(mode),
+        })
     }
 
-    /// Obtain a platform for lookups from a repo-`relative` path, typically obtained from an index entry. `is_dir` should reflect
-    /// whether it's a directory or not, or left at `None` if unknown.
-    /// `find` maybe used to lookup objects from an [id mapping][crate::stack::State::id_mappings_from_index()].
+    /// Obtain a platform for lookups from a repo-`relative` path, typically obtained from an index entry. `mode` should reflect
+    /// the kind of item set here, or left at `None` if unknown.
+    /// `objects` maybe used to lookup objects from an [id mapping][crate::stack::State::id_mappings_from_index()].
     /// All effects are similar to [`at_path()`][Self::at_path()].
     ///
-    /// If `relative` ends with `/` and `is_dir` is `None`, it is automatically assumed to be a directory.
-    ///
-    /// ### Panics
-    ///
-    /// on illformed UTF8 in `relative`
-    pub fn at_entry<'r, Find, E>(
+    /// If `relative` ends with `/` and `mode` is `None`, it is automatically assumed set to be a directory.
+    pub fn at_entry<'r>(
         &mut self,
         relative: impl Into<&'r BStr>,
-        is_dir: Option<bool>,
-        find: Find,
-    ) -> std::io::Result<Platform<'_>>
-    where
-        Find: for<'a> FnMut(&oid, &'a mut Vec<u8>) -> Result<gix_object::BlobRef<'a>, E>,
-        E: std::error::Error + Send + Sync + 'static,
-    {
+        mode: Option<gix_index::entry::Mode>,
+        objects: &dyn gix_object::Find,
+    ) -> std::io::Result<Platform<'_>> {
         let relative = relative.into();
-        let relative_path = gix_path::from_bstr(relative);
+        let relative_path = gix_path::try_from_bstr(relative).map_err(|_err| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("The path \"{relative}\" contained invalid UTF-8 and could not be turned into a path"),
+            )
+        })?;
 
         self.at_path(
             relative_path,
-            is_dir.or_else(|| relative.ends_with_str("/").then_some(true)),
-            find,
+            mode.or_else(|| relative.ends_with_str("/").then_some(gix_index::entry::Mode::DIR)),
+            objects,
         )
     }
+}
+
+fn mode_is_dir(mode: Option<gix_index::entry::Mode>) -> Option<bool> {
+    mode.map(|m|
+        // This applies to directories and commits (submodules are directories on disk)
+        m.is_sparse() || m.is_submodule())
 }
 
 /// Mutation

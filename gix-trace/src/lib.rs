@@ -1,14 +1,14 @@
-//! A crate providing macros for creating spans in various detail levels. `coarse!` shoudl be used for top-level operations, whereas
+//! A crate providing macros for creating spans in various detail levels. `coarse!` should be used for top-level operations, whereas
 //! `detail!` should be used in plumbing crates unless their operations are likely to cost a lot of time.
 //!
 //! The application is supposed to explicitly turn on tracing via `gix-features`.
 //! Crates that use `gix-features` should use `gix_features::trace`, and those who don't can use `gix_trace` directly.
 //! ## Feature Flags
 #![cfg_attr(
-    feature = "document-features",
-    cfg_attr(doc, doc = ::document_features::document_features!())
+    all(doc, feature = "document-features"),
+    doc = ::document_features::document_features!()
 )]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(all(doc, feature = "document-features"), feature(doc_cfg, doc_auto_cfg))]
 #![deny(missing_docs, rust_2018_idioms, unsafe_code)]
 
 /// The level at which the tracing item should be created.

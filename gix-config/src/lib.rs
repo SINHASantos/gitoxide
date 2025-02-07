@@ -31,10 +31,10 @@
 //!
 //! ## Feature Flags
 #![cfg_attr(
-    feature = "document-features",
-    cfg_attr(doc, doc = ::document_features::document_features!())
+    all(doc, feature = "document-features"),
+    doc = ::document_features::document_features!()
 )]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(all(doc, feature = "document-features"), feature(doc_cfg, doc_auto_cfg))]
 #![deny(missing_docs, rust_2018_idioms, unsafe_code)]
 
 pub mod file;
@@ -46,6 +46,8 @@ pub mod parse;
 pub mod value;
 pub use gix_config_value::{color, integer, path, Boolean, Color, Integer, Path};
 
+mod key;
+pub use key::{AsKey, KeyRef};
 mod types;
 pub use types::{File, Source};
 ///

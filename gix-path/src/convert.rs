@@ -1,3 +1,4 @@
+use std::path::Component;
 use std::{
     borrow::Cow,
     ffi::{OsStr, OsString},
@@ -33,6 +34,14 @@ pub fn os_string_into_bstring(path: OsString) -> Result<BString, Utf8Error> {
     match path {
         Cow::Borrowed(_path) => unreachable!("borrowed cows stay borrowed"),
         Cow::Owned(path) => Ok(path),
+    }
+}
+
+/// Like [`into_bstr()`], but takes `Cow<OsStr>` as input for a lossless, but fallible, conversion.
+pub fn try_os_str_into_bstr(path: Cow<'_, OsStr>) -> Result<Cow<'_, BStr>, Utf8Error> {
+    match path {
+        Cow::Borrowed(path) => os_str_into_bstr(path).map(Cow::Borrowed),
+        Cow::Owned(path) => os_string_into_bstring(path).map(Cow::Owned),
     }
 }
 
@@ -246,17 +255,15 @@ pub fn to_windows_separators<'a>(path: impl Into<Cow<'a, BStr>>) -> Cow<'a, BStr
 /// instead.
 ///
 /// Note that we might access the `current_dir` if we run out of path components to pop off, which is expected to be absolute
-/// as typical return value of `std::env::current_dir()`.
+/// as typical return value of `std::env::current_dir()` or `gix_fs::current_dir(…)` when `core.precomposeUnicode` is known.
 /// As a `current_dir` like `/c` can be exhausted by paths like `../../r`, `None` will be returned to indicate the inability
 /// to produce a logically consistent path.
-pub fn normalize<'a>(path: impl Into<Cow<'a, Path>>, current_dir: impl AsRef<Path>) -> Option<Cow<'a, Path>> {
+pub fn normalize<'a>(path: Cow<'a, Path>, current_dir: &Path) -> Option<Cow<'a, Path>> {
     use std::path::Component::ParentDir;
 
-    let path = path.into();
     if !path.components().any(|c| matches!(c, ParentDir)) {
         return Some(path);
     }
-    let current_dir = current_dir.as_ref();
     let mut current_dir_opt = Some(current_dir);
     let was_relative = path.is_relative();
     let components = path.components();
@@ -271,7 +278,7 @@ pub fn normalize<'a>(path: impl Into<Cow<'a, Path>>, current_dir: impl AsRef<Pat
                 return None;
             }
         } else {
-            path.push(component)
+            path.push(component);
         }
     }
 
@@ -281,4 +288,49 @@ pub fn normalize<'a>(path: impl Into<Cow<'a, Path>>, current_dir: impl AsRef<Pat
         path.into()
     }
     .into()
+}
+
+/// Rebuild the worktree-relative `relative_path` to be relative to `prefix`, which is the worktree-relative
+/// path equivalent to the position of the user, or current working directory.
+/// This is a no-op if `prefix` is empty.
+///
+/// Note that both `relative_path` and `prefix` are assumed to be [normalized](normalize()), and failure to do so
+/// will lead to incorrect results.
+///
+/// Note that both input paths are expected to be equal in terms of case too, as comparisons will be case-sensitive.
+pub fn relativize_with_prefix<'a>(relative_path: &'a Path, prefix: &Path) -> Cow<'a, Path> {
+    if prefix.as_os_str().is_empty() {
+        return Cow::Borrowed(relative_path);
+    }
+    debug_assert!(
+        relative_path.components().all(|c| matches!(c, Component::Normal(_))),
+        "BUG: all input is expected to be normalized, but relative_path was not"
+    );
+    debug_assert!(
+        prefix.components().all(|c| matches!(c, Component::Normal(_))),
+        "BUG: all input is expected to be normalized, but prefix was not"
+    );
+
+    let mut buf = PathBuf::new();
+    let mut rpc = relative_path.components().peekable();
+    let mut equal_thus_far = true;
+    for pcomp in prefix.components() {
+        if equal_thus_far {
+            if let (Component::Normal(pname), Some(Component::Normal(rpname))) = (pcomp, rpc.peek()) {
+                if &pname == rpname {
+                    rpc.next();
+                    continue;
+                } else {
+                    equal_thus_far = false;
+                }
+            }
+        }
+        buf.push(Component::ParentDir);
+    }
+    buf.extend(rpc);
+    if buf.as_os_str().is_empty() {
+        Cow::Borrowed(Path::new("."))
+    } else {
+        Cow::Owned(buf)
+    }
 }

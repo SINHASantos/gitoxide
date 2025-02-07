@@ -1,10 +1,13 @@
 use std::path::PathBuf;
 
+use clap_complete::Shell;
 use gitoxide_core as core;
 use gix::bstr::BString;
 
+use crate::shared::AsRange;
+
 #[derive(Debug, clap::Parser)]
-#[clap(name = "gix", about = "The git underworld", version = option_env!("GITOXIDE_VERSION"))]
+#[clap(name = "gix", about = "The git underworld", version = option_env!("GIX_VERSION"))]
 #[clap(subcommand_required = true)]
 #[clap(arg_required_else_help = true)]
 pub struct Args {
@@ -77,15 +80,20 @@ pub struct Args {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Subcommands {
-    /// Subcommands for creating worktree archivs
+    /// Subcommands for creating worktree archives
     #[cfg(feature = "gitoxide-core-tools-archive")]
     Archive(archive::Platform),
-    /// Subcommands for interacting with commit-graphs
+    /// Remove untracked files from the working tree
+    #[cfg(feature = "gitoxide-core-tools-clean")]
+    Clean(clean::Command),
+    /// Subcommands for interacting with commit-graph files
     #[clap(subcommand)]
     CommitGraph(commitgraph::Subcommands),
     /// Interact with the object database.
     #[clap(subcommand)]
     Odb(odb::Subcommands),
+    /// Check for missing objects.
+    Fsck(fsck::Platform),
     /// Interact with tree objects.
     #[clap(subcommand)]
     Tree(tree::Subcommands),
@@ -106,6 +114,7 @@ pub enum Subcommands {
     /// Fetch data from remotes and store it in the repository
     #[cfg(feature = "gitoxide-core-blocking-client")]
     Fetch(fetch::Platform),
+    /// Clone a repository into a new directory
     #[cfg(feature = "gitoxide-core-blocking-client")]
     Clone(clone::Platform),
     /// Interact with the mailmap.
@@ -120,19 +129,54 @@ pub enum Subcommands {
     /// Interact with the exclude files like .gitignore.
     #[clap(subcommand)]
     Exclude(exclude::Subcommands),
+    /// Interact with a worktree index like .git/index
     #[clap(subcommand)]
     Index(index::Subcommands),
     /// Interact with submodules.
     #[clap(alias = "submodules")]
     Submodule(submodule::Platform),
+    /// Show whatever object is at the given spec.
+    Cat {
+        /// The object to print to stdout.
+        revspec: String,
+    },
+    IsClean,
+    IsChanged,
     /// Show which git configuration values are used or planned.
     ConfigTree,
+    Status(status::Platform),
     Config(config::Platform),
     #[cfg(feature = "gitoxide-core-tools-corpus")]
     Corpus(corpus::Platform),
+    MergeBase(merge_base::Command),
+    Merge(merge::Platform),
+    Env,
+    Diff(diff::Platform),
+    Log(log::Platform),
+    Worktree(worktree::Platform),
     /// Subcommands that need no git repository to run.
     #[clap(subcommand)]
     Free(free::Subcommands),
+    /// Blame lines in a file
+    Blame {
+        /// Print additional statistics to help understanding performance.
+        #[clap(long, short = 's')]
+        statistics: bool,
+        /// The file to create the blame information for.
+        file: std::ffi::OsString,
+        /// Only blame lines in the given 1-based inclusive range '<start>,<end>', e.g. '20,40'.
+        #[clap(short='L', value_parser=AsRange)]
+        range: Option<std::ops::Range<u32>>,
+    },
+    /// Generate shell completions to stdout or a directory.
+    #[clap(visible_alias = "generate-completions", visible_alias = "shell-completions")]
+    Completions {
+        /// The shell to generate completions for. Otherwise it's derived from the environment.
+        #[clap(long, short)]
+        shell: Option<Shell>,
+        /// The output directory in case multiple files are generated. If not provided, will write to stdout.
+        out_dir: Option<String>,
+    },
 }
 
 #[cfg(feature = "gitoxide-core-tools-archive")]
@@ -183,6 +227,99 @@ pub mod archive {
     }
 }
 
+pub mod status {
+    use crate::shared::{CheckPathSpec, ParseRenameFraction};
+    use gix::bstr::BString;
+
+    #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
+    pub enum Submodules {
+        /// display all information about submodules, including ref changes, modifications and untracked files.
+        #[default]
+        All,
+        /// Compare only the configuration of the superprojects commit with the actually checked out `HEAD` commit.
+        RefChange,
+        /// See if there are worktree modifications compared to the index, but do not check for untracked files.
+        Modifications,
+        /// Ignore all submodule changes.
+        None,
+    }
+
+    #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
+    pub enum Ignored {
+        /// display all ignored files and directories, but collapse them if possible to simplify.
+        #[default]
+        Collapsed,
+        /// Show exact matches. Note that this may show directories if these are a match as well.
+        ///
+        /// Simplification will not happen in this mode.
+        Matching,
+        // TODO: figure out how to implement traditional, which right now can't be done as it requires ignored folders
+        //       to be fully expanded. This should probably be implemented in `gix_dir` which then simply works by not
+        //       allowing to ignore directories, naturally traversing the entire content.
+    }
+
+    #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
+    pub enum Format {
+        /// A basic format that is easy to read, and useful for a first glimpse as flat list.
+        #[default]
+        Simplified,
+        /// Output very similar to `git status --porcelain=2`.
+        PorcelainV2,
+    }
+
+    #[derive(Debug, clap::Parser)]
+    #[command(about = "compute repository status similar to `git status`")]
+    pub struct Platform {
+        /// The way status data is displayed.
+        #[clap(long, short = 'f')]
+        pub format: Option<Format>,
+        /// If enabled, show ignored files and directories.
+        #[clap(long)]
+        pub ignored: Option<Option<Ignored>>,
+        /// Define how to display the submodule status. Defaults to git configuration if unset.
+        #[clap(long)]
+        pub submodules: Option<Submodules>,
+        /// Print additional statistics to help understanding performance.
+        #[clap(long, short = 's')]
+        pub statistics: bool,
+        /// Don't write back a changed index, which forces this operation to always be idempotent.
+        #[clap(long)]
+        pub no_write: bool,
+        /// Enable rename tracking between the index and the working tree, preventing the collapse of folders as well.
+        #[clap(long, value_parser = ParseRenameFraction)]
+        pub index_worktree_renames: Option<Option<f32>>,
+        /// The git path specifications to list attributes for, or unset to read from stdin one per line.
+        #[clap(value_parser = CheckPathSpec)]
+        pub pathspec: Vec<BString>,
+    }
+}
+
+pub mod merge_base {
+    #[derive(Debug, clap::Parser)]
+    #[command(about = "A command for calculating all merge-bases")]
+    pub struct Command {
+        /// A revspec for the first commit.
+        pub first: String,
+        /// Revspecs for the other commits to compute the merge-base with.
+        pub others: Vec<String>,
+    }
+}
+
+pub mod worktree {
+    #[derive(Debug, clap::Parser)]
+    #[command(about = "Commands for handling worktrees")]
+    pub struct Platform {
+        #[clap(subcommand)]
+        pub cmd: SubCommands,
+    }
+
+    #[derive(Debug, clap::Subcommand)]
+    pub enum SubCommands {
+        /// List all worktrees, along with some accompanying information
+        List,
+    }
+}
+
 #[cfg(feature = "gitoxide-core-tools-corpus")]
 pub mod corpus {
     use std::path::PathBuf;
@@ -225,8 +362,174 @@ pub mod corpus {
     }
 }
 
-pub mod config {
+pub mod merge {
+    use gix::bstr::BString;
 
+    #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
+    pub enum ResolveWith {
+        /// Use ours then theirs in case of conflict.
+        Union,
+        /// Use only ours in case of conflict.
+        Ours,
+        /// Use only theirs in case of conflict.
+        Theirs,
+    }
+
+    impl From<ResolveWith> for gix::merge::blob::builtin_driver::text::Conflict {
+        fn from(value: ResolveWith) -> Self {
+            match value {
+                ResolveWith::Union => gix::merge::blob::builtin_driver::text::Conflict::ResolveWithUnion,
+                ResolveWith::Ours => gix::merge::blob::builtin_driver::text::Conflict::ResolveWithOurs,
+                ResolveWith::Theirs => gix::merge::blob::builtin_driver::text::Conflict::ResolveWithTheirs,
+            }
+        }
+    }
+
+    #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
+    pub enum FileFavor {
+        /// Use only ours in case of conflict.
+        Ours,
+        /// Use only theirs in case of conflict.
+        Theirs,
+    }
+
+    #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
+    pub enum TreeFavor {
+        /// Use only the previous tree entry in case of conflict.
+        Ancestor,
+        /// Use only ours tree entry in case of conflict.
+        Ours,
+    }
+
+    impl From<FileFavor> for gix::merge::tree::FileFavor {
+        fn from(value: FileFavor) -> Self {
+            match value {
+                FileFavor::Ours => gix::merge::tree::FileFavor::Ours,
+                FileFavor::Theirs => gix::merge::tree::FileFavor::Theirs,
+            }
+        }
+    }
+
+    impl From<TreeFavor> for gix::merge::tree::TreeFavor {
+        fn from(value: TreeFavor) -> Self {
+            match value {
+                TreeFavor::Ancestor => gix::merge::tree::TreeFavor::Ancestor,
+                TreeFavor::Ours => gix::merge::tree::TreeFavor::Ours,
+            }
+        }
+    }
+
+    #[derive(Debug, clap::Parser)]
+    pub struct SharedOptions {
+        /// Keep all objects to be written in memory to avoid any disk IO.
+        ///
+        /// Note that the resulting tree won't be available or inspectable.
+        #[clap(long, short = 'm')]
+        pub in_memory: bool,
+        /// Decide how to resolve content conflicts in files. If unset, write conflict markers and fail.
+        #[clap(long, short = 'f')]
+        pub file_favor: Option<FileFavor>,
+        /// Decide how to resolve conflicts in trees, i.e. modification/deletion. If unset, try to preserve both states and fail.
+        #[clap(long, short = 't')]
+        pub tree_favor: Option<TreeFavor>,
+        /// Print additional information about conflicts for debugging.
+        #[clap(long, short = 'd')]
+        pub debug: bool,
+    }
+
+    #[derive(Debug, clap::Parser)]
+    #[command(about = "perform merges of various kinds")]
+    pub struct Platform {
+        #[clap(subcommand)]
+        pub cmd: SubCommands,
+    }
+
+    #[derive(Debug, clap::Subcommand)]
+    pub enum SubCommands {
+        /// Merge a file by specifying ours, base and theirs.
+        File {
+            /// Decide how to resolve conflicts. If unset, write conflict markers and fail.
+            #[clap(long, short = 'c')]
+            resolve_with: Option<ResolveWith>,
+
+            /// A path or revspec to our file.
+            #[clap(value_name = "OURS", value_parser = crate::shared::AsBString)]
+            ours: BString,
+            /// A path or revspec to the base for both ours and theirs.
+            #[clap(value_name = "BASE", value_parser = crate::shared::AsBString)]
+            base: BString,
+            /// A path or revspec to their file.
+            #[clap(value_name = "THEIRS", value_parser = crate::shared::AsBString)]
+            theirs: BString,
+        },
+
+        /// Merge a tree by specifying ours, base and theirs, writing it to the object database.
+        Tree {
+            #[clap(flatten)]
+            opts: SharedOptions,
+
+            /// A revspec to our treeish.
+            #[clap(value_name = "OURS", value_parser = crate::shared::AsBString)]
+            ours: BString,
+            /// A revspec to the base as treeish for both ours and theirs.
+            #[clap(value_name = "BASE", value_parser = crate::shared::AsBString)]
+            base: BString,
+            /// A revspec to their treeish.
+            #[clap(value_name = "THEIRS", value_parser = crate::shared::AsBString)]
+            theirs: BString,
+        },
+        /// Merge a commits by specifying ours, and theirs, writing the tree to the object database.
+        Commit {
+            #[clap(flatten)]
+            opts: SharedOptions,
+
+            /// A revspec to our committish.
+            #[clap(value_name = "OURS", value_parser = crate::shared::AsBString)]
+            ours: BString,
+            /// A revspec to their committish.
+            #[clap(value_name = "THEIRS", value_parser = crate::shared::AsBString)]
+            theirs: BString,
+        },
+    }
+}
+
+pub mod diff {
+    use gix::bstr::BString;
+
+    /// Print all changes between two objects
+    #[derive(Debug, clap::Parser)]
+    pub struct Platform {
+        #[clap(subcommand)]
+        pub cmd: SubCommands,
+    }
+
+    #[derive(Debug, clap::Subcommand)]
+    pub enum SubCommands {
+        /// Diff two trees.
+        Tree {
+            /// A rev-spec representing the 'before' or old tree.
+            #[clap(value_parser = crate::shared::AsBString)]
+            old_treeish: BString,
+            /// A rev-spec representing the 'after' or new tree.
+            #[clap(value_parser = crate::shared::AsBString)]
+            new_treeish: BString,
+        },
+    }
+}
+
+pub mod log {
+    use gix::bstr::BString;
+
+    /// List all commits in a repository, optionally limited to those that change a given path
+    #[derive(Debug, clap::Parser)]
+    pub struct Platform {
+        /// The git path specification to show a log for.
+        #[clap(value_parser = crate::shared::AsBString)]
+        pub pathspec: Option<BString>,
+    }
+}
+
+pub mod config {
     use gix::bstr::BString;
 
     /// Print all entries in a configuration file or access other sub-commands
@@ -351,6 +654,10 @@ pub mod clone {
         /// The url of the remote to connect to, like `https://github.com/byron/gitoxide`.
         pub remote: OsString,
 
+        /// The name of the reference to check out.
+        #[clap(long = "ref", value_parser = crate::shared::AsPartialRefName, value_name = "REF_NAME")]
+        pub ref_name: Option<gix::refs::PartialName>,
+
         /// The directory to initialize with the new repository and to which all data should be written.
         pub directory: Option<PathBuf>,
     }
@@ -425,10 +732,82 @@ pub mod remote {
 }
 
 pub mod mailmap {
+    use gix::bstr::BString;
+
     #[derive(Debug, clap::Subcommand)]
     pub enum Subcommands {
         /// Print all entries in configured mailmaps, inform about errors as well.
         Entries,
+        /// Print the canonical form of contacts according to the configured mailmaps.
+        Check {
+            /// One or more `Name <email>` or `<email>` to pass through the mailmap.
+            contacts: Vec<BString>,
+        },
+    }
+}
+
+#[cfg(feature = "gitoxide-core-tools-clean")]
+pub mod clean {
+    use crate::shared::CheckPathSpec;
+    use gix::bstr::BString;
+
+    #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
+    pub enum FindRepository {
+        All,
+        #[default]
+        NonBare,
+    }
+
+    impl From<FindRepository> for gitoxide_core::repository::clean::FindRepository {
+        fn from(value: FindRepository) -> Self {
+            match value {
+                FindRepository::All => gitoxide_core::repository::clean::FindRepository::All,
+                FindRepository::NonBare => gitoxide_core::repository::clean::FindRepository::NonBare,
+            }
+        }
+    }
+
+    #[derive(Debug, clap::Parser)]
+    pub struct Command {
+        /// Print additional debug information to help understand decisions it made.
+        #[arg(long)]
+        pub debug: bool,
+        /// A dummy to easy with muscle-memory. This flag is assumed if provided or not, and has no effect.
+        #[arg(short = 'n', long)]
+        pub dry_run: bool,
+        /// Actually perform the operation, which deletes files on disk without chance of recovery.
+        #[arg(long, short = 'e')]
+        pub execute: bool,
+        /// Remove ignored (and expendable) files.
+        #[arg(long, short = 'x')]
+        pub ignored: bool,
+        /// Remove precious files.
+        #[arg(long, short = 'p')]
+        pub precious: bool,
+        /// Remove whole directories.
+        #[arg(long, short = 'd')]
+        pub directories: bool,
+        /// Remove nested repositories, even outside ignored directories.
+        #[arg(long, short = 'r')]
+        pub repositories: bool,
+        /// Pathspec patterns are used to match the result of the dirwalk, not the dirwalk itself.
+        ///
+        /// Use this if there is trouble using wildcard pathspecs, which affect the directory walk
+        /// in reasonable, but often unexpected ways.
+        #[arg(long, short = 'm')]
+        pub pathspec_matches_result: bool,
+        /// Enter ignored directories to skip repositories contained within.
+        ///
+        /// This identifies and avoids deleting separate repositories that are nested inside
+        /// ignored directories eligible for removal.
+        #[arg(long)]
+        pub skip_hidden_repositories: Option<FindRepository>,
+        /// What kind of repositories to find inside of untracked directories.
+        #[arg(long, default_value = "non-bare")]
+        pub find_untracked_repositories: FindRepository,
+        /// The git path specifications to list attributes for, or unset to read from stdin one per line.
+        #[clap(value_parser = CheckPathSpec)]
+        pub pathspec: Vec<BString>,
     }
 }
 
@@ -441,7 +820,19 @@ pub mod odb {
         Info,
         /// Count and obtain information on all, possibly duplicate, objects in the database.
         #[clap(visible_alias = "statistics")]
-        Stats,
+        Stats {
+            /// Lookup headers again, but without preloading indices.
+            #[clap(long)]
+            extra_header_lookup: bool,
+        },
+    }
+}
+
+pub mod fsck {
+    #[derive(Debug, clap::Parser)]
+    pub struct Platform {
+        /// A revspec to start the connectivity check from.
+        pub spec: Option<String>,
     }
 }
 
@@ -510,6 +901,10 @@ pub mod commit {
             /// If there was no way to describe the commit, fallback to using the abbreviated input revision.
             always: bool,
 
+            /// Set the suffix to append if the repository is dirty (not counting untracked files).
+            #[clap(short = 'd', long)]
+            dirty_suffix: Option<Option<String>>,
+
             /// A specification of the revision to use, or the current `HEAD` if unset.
             rev_spec: Option<String>,
         },
@@ -535,13 +930,13 @@ pub mod credential {
 pub mod commitgraph {
     #[derive(Debug, clap::Subcommand)]
     pub enum Subcommands {
-        /// Verify the integrity of a commit graph
+        /// Verify the integrity of a commit graph file
         Verify {
-            /// output statistical information about the pack
+            /// output statistical information about the graph.
             #[clap(long, short = 's')]
             statistics: bool,
         },
-        /// List all entries in the commit-graph as reachable by starting from `HEAD`.
+        /// List all entries in the commit-graph file as reachable by starting from `HEAD`.
         List {
             /// The rev-spec to list reachable commits from.
             #[clap(default_value = "@")]
@@ -551,6 +946,30 @@ pub mod commitgraph {
 }
 
 pub mod revision {
+    pub mod resolve {
+        #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
+        pub enum TreeMode {
+            /// Show the raw bytes - only useful for piping into files for use with tooling.
+            Raw,
+            /// Display a tree in human-readable form.
+            #[default]
+            Pretty,
+        }
+
+        #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
+        pub enum BlobFormat {
+            /// The version stored in the Git Object Database.
+            #[default]
+            Git,
+            /// The version that would be checked out into the worktree, including filters.
+            Worktree,
+            /// The version that would be diffed (Worktree + Text-Conversion)
+            Diff,
+            /// The version that would be diffed if there is a text-conversion, or the one stored in Git otherwise.
+            DiffOrGit,
+        }
+    }
+
     #[derive(Debug, clap::Subcommand)]
     #[clap(visible_alias = "rev", visible_alias = "r")]
     pub enum Subcommands {
@@ -578,9 +997,18 @@ pub mod revision {
             /// Equivalent to the `explain` subcommand.
             #[clap(short = 'e', long)]
             explain: bool,
+            /// Also show the name of the reference which led to the object.
+            #[clap(short = 'r', long, conflicts_with = "explain")]
+            reference: bool,
             /// Show the first resulting object similar to how `git cat-file` would, but don't show the resolved spec.
             #[clap(short = 'c', long, conflicts_with = "explain")]
             cat_file: bool,
+            /// How to display blobs.
+            #[clap(short = 'b', long, default_value = "git")]
+            blob_format: resolve::BlobFormat,
+            /// How to display trees as obtained with `@:dirname` or `@^{tree}`.
+            #[clap(short = 't', long, default_value = "pretty")]
+            tree_mode: resolve::TreeMode,
             /// rev-specs like `@`, `@~1` or `HEAD^2`.
             #[clap(required = true)]
             specs: Vec<std::ffi::OsString>,
@@ -592,9 +1020,8 @@ pub mod revision {
 }
 
 pub mod attributes {
-    use gix::bstr::BString;
-
     use crate::shared::CheckPathSpec;
+    use gix::bstr::BString;
 
     #[derive(Debug, clap::Subcommand)]
     pub enum Subcommands {
@@ -623,9 +1050,8 @@ pub mod attributes {
 pub mod exclude {
     use std::ffi::OsString;
 
-    use gix::bstr::BString;
-
     use crate::shared::CheckPathSpec;
+    use gix::bstr::BString;
 
     #[derive(Debug, clap::Subcommand)]
     pub enum Subcommands {
@@ -654,17 +1080,16 @@ pub mod exclude {
 pub mod index {
     use std::path::PathBuf;
 
-    use gix::bstr::BString;
-
     use crate::shared::CheckPathSpec;
+    use gix::bstr::BString;
 
     pub mod entries {
         #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
         pub enum Format {
-            ///
+            /// Show only minimal information, useful for first glances.
             #[default]
             Simple,
-            /// Use the `.tar` file format, uncompressed.
+            /// Show much more information that is still human-readable.
             Rich,
         }
     }
@@ -705,6 +1130,9 @@ pub mod index {
             /// back by default, but that requires us to write more of the index to work.
             #[clap(long, short = 'i')]
             index_output_path: Option<PathBuf>,
+            /// Don't write the trailing hash for a performance gain.
+            #[clap(long, short = 's')]
+            skip_hash: bool,
             /// A revspec that points to the to generate the index from.
             spec: std::ffi::OsString,
         },
@@ -712,7 +1140,6 @@ pub mod index {
 }
 
 pub mod submodule {
-
     #[derive(Debug, clap::Parser)]
     pub struct Platform {
         #[clap(subcommand)]
@@ -722,7 +1149,11 @@ pub mod submodule {
     #[derive(Debug, clap::Subcommand)]
     pub enum Subcommands {
         /// Print all direct submodules to standard output
-        List,
+        List {
+            /// Set the suffix to append if the repository is dirty (not counting untracked files).
+            #[clap(short = 'd', long)]
+            dirty_suffix: Option<Option<String>>,
+        },
     }
 }
 

@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use bstr::{BStr, ByteSlice};
 use gix_glob::pattern::Case;
+use gix_object::FindExt;
 
 use crate::{
     stack::state::{AttributeMatchGroup, Attributes},
@@ -87,22 +88,17 @@ impl Attributes {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn push_directory<Find, E>(
+    pub(crate) fn push_directory(
         &mut self,
         root: &Path,
         dir: &Path,
         rela_dir: &BStr,
         buf: &mut Vec<u8>,
         id_mappings: &[PathIdMapping],
-        mut find: Find,
+        objects: &dyn gix_object::Find,
         stats: &mut Statistics,
-    ) -> std::io::Result<()>
-    where
-        Find: for<'b> FnMut(&gix_hash::oid, &'b mut Vec<u8>) -> Result<gix_object::BlobRef<'b>, E>,
-        E: std::error::Error + Send + Sync + 'static,
-    {
-        let attr_path_relative =
-            gix_path::to_unix_separators_on_windows(gix_path::join_bstr_unix_pathsep(rela_dir, ".gitattributes"));
+    ) -> std::io::Result<()> {
+        let attr_path_relative = gix_path::join_bstr_unix_pathsep(rela_dir, ".gitattributes");
         let attr_file_in_index = id_mappings.binary_search_by(|t| t.0.as_bstr().cmp(attr_path_relative.as_ref()));
         // Git does not follow symbolic links as per documentation.
         let no_follow_symlinks = false;
@@ -112,7 +108,8 @@ impl Attributes {
         match self.source {
             Source::IdMapping | Source::IdMappingThenWorktree => {
                 if let Ok(idx) = attr_file_in_index {
-                    let blob = find(&id_mappings[idx].1, buf)
+                    let blob = objects
+                        .find_blob(&id_mappings[idx].1, buf)
                         .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
                     let attr_path = gix_path::from_bstring(attr_path_relative.into_owned());
                     self.stack.add_patterns_buffer(
@@ -150,7 +147,8 @@ impl Attributes {
                 stats.pattern_files += usize::from(added);
                 stats.tried_pattern_files += 1;
                 if let Some(idx) = attr_file_in_index.ok().filter(|_| !added) {
-                    let blob = find(&id_mappings[idx].1, buf)
+                    let blob = objects
+                        .find_blob(&id_mappings[idx].1, buf)
                         .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
                     let attr_path = gix_path::from_bstring(attr_path_relative.into_owned());
                     self.stack.add_patterns_buffer(
@@ -169,7 +167,7 @@ impl Attributes {
         // Need one stack level per component so push and pop matches, but only if this isn't the root level which is never popped.
         if !added && self.info_attributes.is_none() {
             self.stack
-                .add_patterns_buffer(&[], Path::new("<empty dummy>"), None, &mut self.collection, true)
+                .add_patterns_buffer(&[], "<empty dummy>".into(), None, &mut self.collection, true);
         }
 
         // When reading the root, always the first call, we can try to also read the `.git/info/attributes` file which is

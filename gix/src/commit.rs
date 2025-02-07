@@ -1,4 +1,7 @@
 //!
+#![allow(clippy::empty_docs)]
+
+use std::convert::Infallible;
 
 /// An empty array of a type usable with the `gix::easy` API to help declaring no parents should be used
 pub const NO_PARENT_IDS: [gix_hash::ObjectId; 0] = [];
@@ -21,13 +24,19 @@ pub enum Error {
     ReferenceEdit(#[from] crate::reference::edit::Error),
 }
 
+impl From<std::convert::Infallible> for Error {
+    fn from(_value: Infallible) -> Self {
+        unreachable!("cannot be invoked")
+    }
+}
+
 ///
+#[cfg(feature = "revision")]
 pub mod describe {
     use std::borrow::Cow;
 
     use gix_hash::ObjectId;
     use gix_hashtable::HashMap;
-    use gix_odb::Find;
 
     use crate::{bstr::BStr, ext::ObjectIdExt, Repository};
 
@@ -39,11 +48,32 @@ pub mod describe {
         pub id: crate::Id<'repo>,
     }
 
-    impl<'repo> Resolution<'repo> {
-        /// Turn this instance into something displayable
+    impl Resolution<'_> {
+        /// Turn this instance into something displayable.
         pub fn format(self) -> Result<gix_revision::describe::Format<'static>, Error> {
             let prefix = self.id.shorten()?;
             Ok(self.outcome.into_format(prefix.hex_len()))
+        }
+
+        /// Turn this instance into something displayable, possibly with dirty-suffix.
+        ///
+        /// If `dirty_suffix` is `Some(suffix)`, a possibly expensive [dirty check](crate::Repository::is_dirty()) will be
+        /// performed so that the `suffix` is appended to the output. If it is `None`, no check will be performed and
+        /// there will be no suffix.
+        /// Note that obtaining the dirty-state of the repository can be expensive.
+        #[cfg(feature = "status")]
+        pub fn format_with_dirty_suffix(
+            self,
+            dirty_suffix: impl Into<Option<String>>,
+        ) -> Result<gix_revision::describe::Format<'static>, Error> {
+            let prefix = self.id.shorten()?;
+            let mut dirty_suffix = dirty_suffix.into();
+            if dirty_suffix.is_some() && !self.id.repo.is_dirty()? {
+                dirty_suffix.take();
+            }
+            let mut format = self.outcome.into_format(prefix.hex_len());
+            format.dirty_suffix = dirty_suffix;
+            Ok(format)
         }
     }
 
@@ -52,6 +82,8 @@ pub mod describe {
     #[allow(missing_docs)]
     pub enum Error {
         #[error(transparent)]
+        OpenCache(#[from] crate::repository::commit_graph_if_enabled::Error),
+        #[error(transparent)]
         Describe(#[from] gix_revision::describe::Error),
         #[error("Could not produce an unambiguous shortened id for formatting.")]
         ShortId(#[from] crate::id::shorten::Error),
@@ -59,6 +91,9 @@ pub mod describe {
         RefIter(#[from] crate::reference::iter::Error),
         #[error(transparent)]
         RefIterInit(#[from] crate::reference::iter::init::Error),
+        #[error(transparent)]
+        #[cfg(feature = "status")]
+        DetermineIsDirty(#[from] crate::status::is_dirty::Error),
     }
 
     /// A selector to choose what kind of references should contribute to names.
@@ -146,7 +181,8 @@ pub mod describe {
     /// A support type to allow configuring a `git describe` operation
     pub struct Platform<'repo> {
         pub(crate) id: gix_hash::ObjectId,
-        pub(crate) repo: &'repo crate::Repository,
+        /// The owning repository.
+        pub repo: &'repo crate::Repository,
         pub(crate) select: SelectRef,
         pub(crate) first_parent: bool,
         pub(crate) id_as_fallback: bool,
@@ -179,9 +215,7 @@ pub mod describe {
         }
 
         /// Try to find a name for the configured commit id using all prior configuration, returning `Some(describe::Format)`
-        /// if one was found.
-        ///
-        /// Note that there will always be `Some(format)`
+        /// if one was found, or `None` if that wasn't the case.
         pub fn try_format(&self) -> Result<Option<gix_revision::describe::Format<'static>>, Error> {
             self.try_resolve()?.map(Resolution::format).transpose()
         }
@@ -193,19 +227,13 @@ pub mod describe {
         ///
         /// # Performance
         ///
-        /// It is greatly recommended to [assure an object cache is set][crate::Repository::object_cache_size_if_unset()]
+        /// It is greatly recommended to [assure an object cache is set](crate::Repository::object_cache_size_if_unset())
         /// to save ~40% of time.
-        pub fn try_resolve(&self) -> Result<Option<Resolution<'repo>>, Error> {
-            // TODO: dirty suffix with respective dirty-detection
-            let mut graph = gix_revision::Graph::new(
-                |id, buf| {
-                    self.repo
-                        .objects
-                        .try_find(id, buf)
-                        .map(|r| r.and_then(gix_object::Data::try_into_commit_iter))
-                },
-                gix_commitgraph::Graph::from_info_dir(self.repo.objects.store_ref().path().join("info")).ok(),
-            );
+        pub fn try_resolve_with_cache(
+            &self,
+            cache: Option<&'_ gix_commitgraph::Graph>,
+        ) -> Result<Option<Resolution<'repo>>, Error> {
+            let mut graph = self.repo.revision_graph(cache);
             let outcome = gix_revision::describe(
                 &self.id,
                 &mut graph,
@@ -223,7 +251,17 @@ pub mod describe {
             }))
         }
 
-        /// Like [`try_format()`][Platform::try_format()], but turns `id_as_fallback()` on to always produce a format.
+        /// Like [`Self::try_resolve_with_cache()`], but obtains the commitgraph-cache internally for a single use.
+        ///
+        /// # Performance
+        ///
+        /// Prefer to use the [`Self::try_resolve_with_cache()`] method when processing more than one commit at a time.
+        pub fn try_resolve(&self) -> Result<Option<Resolution<'repo>>, Error> {
+            let cache = self.repo.commit_graph_if_enabled()?;
+            self.try_resolve_with_cache(cache.as_ref())
+        }
+
+        /// Like [`try_format()`](Self::try_format()), but turns `id_as_fallback()` on to always produce a format.
         pub fn format(&mut self) -> Result<gix_revision::describe::Format<'static>, Error> {
             self.id_as_fallback = true;
             Ok(self.try_format()?.expect("BUG: fallback must always produce a format"))

@@ -14,11 +14,12 @@ fn common_values_and_names_by_path() -> crate::Result {
     assert_eq!(
         modules
             .iter()
-            .map(|m| m.config_path().expect("present").to_owned())
+            .map(|m| { m.config_path().expect("present").to_owned() })
             .collect::<Vec<_>>(),
         [
             "empty-clone/.gitmodules",
             "multiple/.gitmodules",
+            "not-a-submodule/.gitmodules",
             "recursive-clone/.gitmodules",
             "recursive-clone/submodule/.gitmodules",
             "relative-clone/.gitmodules",
@@ -60,14 +61,14 @@ fn common_values_and_names_by_path() -> crate::Result {
 
 fn module_files() -> impl Iterator<Item = (PathBuf, PathBuf)> {
     let dir = gix_testtools::scripted_fixture_read_only("basic.sh").expect("valid fixture");
-    gix_features::fs::walkdir_sorted_new(&dir, Parallelism::Serial)
+    gix_features::fs::walkdir_sorted_new(&dir, Parallelism::Serial, false)
         .follow_links(false)
         .into_iter()
         .filter_map(move |entry| {
             let entry = entry.unwrap();
             (entry.file_name() == OsStr::new(".gitmodules")).then(|| {
                 (
-                    entry.path().to_owned(),
+                    entry.path().into_owned(),
                     entry
                         .path()
                         .strip_prefix(&dir)

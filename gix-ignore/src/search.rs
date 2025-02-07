@@ -15,6 +15,8 @@ pub struct Match<'a> {
     pub pattern: &'a gix_glob::Pattern,
     /// The path to the source from which the pattern was loaded, or `None` if it was specified by other means.
     pub source: Option<&'a Path>,
+    /// The kind of pattern this match represents.
+    pub kind: crate::Kind,
     /// The line at which the pattern was found in its `source` file, or the occurrence in which it was provided.
     pub sequence_number: usize,
 }
@@ -24,13 +26,13 @@ pub struct Match<'a> {
 pub struct Ignore;
 
 impl Pattern for Ignore {
-    type Value = ();
+    type Value = crate::Kind;
 
     fn bytes_to_patterns(bytes: &[u8], _source: &std::path::Path) -> Vec<pattern::Mapping<Self::Value>> {
         crate::parse(bytes)
-            .map(|(pattern, line_number)| pattern::Mapping {
+            .map(|(pattern, line_number, kind)| pattern::Mapping {
                 pattern,
-                value: (),
+                value: kind,
                 sequence_number: line_number,
             })
             .collect()
@@ -42,11 +44,7 @@ impl Search {
     /// Given `git_dir`, a `.git` repository, load static ignore patterns from `info/exclude`
     /// and from `excludes_file` if it is provided.
     /// Note that it's not considered an error if the provided `excludes_file` does not exist.
-    pub fn from_git_dir(
-        git_dir: impl AsRef<Path>,
-        excludes_file: Option<PathBuf>,
-        buf: &mut Vec<u8>,
-    ) -> std::io::Result<Self> {
+    pub fn from_git_dir(git_dir: &Path, excludes_file: Option<PathBuf>, buf: &mut Vec<u8>) -> std::io::Result<Self> {
         let mut group = Self::default();
 
         let follow_symlinks = true;
@@ -57,7 +55,7 @@ impl Search {
                 .transpose()?,
         );
         group.patterns.extend(pattern::List::<Ignore>::from_file(
-            git_dir.as_ref().join("info").join("exclude"),
+            git_dir.join("info").join("exclude"),
             None,
             follow_symlinks,
             buf,
@@ -65,21 +63,25 @@ impl Search {
         Ok(group)
     }
 
-    /// Parse a list of patterns, using slashes as path separators
+    /// Parse a list of ignore patterns, using slashes as path separators.
     pub fn from_overrides(patterns: impl IntoIterator<Item = impl Into<OsString>>) -> Self {
+        Self::from_overrides_inner(&mut patterns.into_iter().map(Into::into))
+    }
+
+    fn from_overrides_inner(patterns: &mut dyn Iterator<Item = OsString>) -> Self {
         Search {
             patterns: vec![pattern::List {
                 patterns: patterns
-                    .into_iter()
-                    .map(Into::into)
                     .enumerate()
                     .filter_map(|(seq_id, pattern)| {
                         let pattern = gix_path::try_into_bstr(PathBuf::from(pattern)).ok()?;
-                        gix_glob::parse(pattern.as_ref()).map(|p| pattern::Mapping {
-                            pattern: p,
-                            value: (),
-                            sequence_number: seq_id,
-                        })
+                        crate::parse(pattern.as_ref())
+                            .next()
+                            .map(|(p, _seq_id, kind)| pattern::Mapping {
+                                pattern: p,
+                                value: kind,
+                                sequence_number: seq_id + 1,
+                            })
                     })
                     .collect(),
                 source: None,
@@ -114,7 +116,7 @@ pub fn pattern_matching_relative_path<'a>(
     list.patterns.iter().rev().find_map(
         |pattern::Mapping {
              pattern,
-             value: (),
+             value: kind,
              sequence_number,
          }| {
             pattern
@@ -127,6 +129,7 @@ pub fn pattern_matching_relative_path<'a>(
                 )
                 .then_some(Match {
                     pattern,
+                    kind: *kind,
                     source: list.source.as_deref(),
                     sequence_number: *sequence_number,
                 })
@@ -163,13 +166,12 @@ impl Search {
     /// Match `relative_path` and return the first match if found.
     /// `is_dir` is true if `relative_path` is a directory.
     /// `case` specifies whether cases should be folded during matching or not.
-    pub fn pattern_matching_relative_path<'a>(
+    pub fn pattern_matching_relative_path(
         &self,
-        relative_path: impl Into<&'a BStr>,
+        relative_path: &BStr,
         is_dir: Option<bool>,
         case: gix_glob::pattern::Case,
     ) -> Option<Match<'_>> {
-        let relative_path = relative_path.into();
         let basename_pos = relative_path.rfind(b"/").map(|p| p + 1);
         self.patterns
             .iter()

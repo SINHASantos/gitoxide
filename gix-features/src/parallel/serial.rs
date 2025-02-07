@@ -42,7 +42,7 @@ mod not_parallel {
         }
     }
 
-    impl<'scope, 'env> Scope<'scope, 'env> {
+    impl<'scope> Scope<'scope, '_> {
         /// Provided with this scope, let `f` start new threads that live within it.
         pub fn spawn<F, T>(&'scope self, f: F) -> ScopedJoinHandle<'scope, T>
         where
@@ -113,7 +113,7 @@ mod not_parallel {
 }
 
 #[cfg(not(feature = "parallel"))]
-pub use not_parallel::{build_thread, in_parallel_with_slice, join, threads, Scope, ScopedJoinHandle};
+pub use not_parallel::{build_thread, in_parallel_with_slice, join, threads, Scope};
 
 /// Read items from `input` and `consume` them in a single thread, producing an output to be collected by a `reducer`,
 /// whose task is to aggregate these outputs into the final result returned by this function.
